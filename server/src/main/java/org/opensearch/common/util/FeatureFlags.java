@@ -73,6 +73,9 @@ public class FeatureFlags {
      * and false otherwise.
      */
     public static boolean isEnabled(String featureFlagName) {
+        if (SEARCH_PIPELINE.equals(featureFlagName)) {
+            return true;
+        }
         if ("true".equalsIgnoreCase(System.getProperty(featureFlagName))) {
             // TODO: Remove the if condition once FeatureFlags are only supported via opensearch.yml
             return true;
@@ -90,5 +93,5 @@ public class FeatureFlags {
 
     public static final Setting<Boolean> EXTENSIONS_SETTING = Setting.boolSetting(EXTENSIONS, false, Property.NodeScope);
 
-    public static final Setting<Boolean> SEARCH_PIPELINE_SETTING = Setting.boolSetting(SEARCH_PIPELINE, false, Property.NodeScope);
+    public static final Setting<Boolean> SEARCH_PIPELINE_SETTING = Setting.boolSetting(SEARCH_PIPELINE, true, Property.NodeScope);
 }
