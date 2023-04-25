@@ -1,0 +1,220 @@
+GET /_nodes/search_pipelines
+
+POST /_bulk
+{ "index" : { "_index" : "order_history", "_id" : "123" } }
+{ "customer_id" : "johndoe", "product_title": "Use your imagination","date" :"2023-04-01", "category" : "adult"}
+{ "index" : { "_index" : "order_history", "_id" : "124" } }
+{ "customer_id" : "johndoe", "product_title": "Earth Rated Dog Poop Bags, Guaranteed Leak Proof and Extra Thick Waste Bag Refill Rolls For Dogs","date" :"2023-04-03", "category" : "pets"}
+{ "index" : { "_index" : "order_history", "_id" : "125" } }
+{ "customer_id" : "johndoe", "product_title": "Cottagecore Aesthetic Cat with Mushroom Hat T-Shirt","date" :"2023-04-05", "category" : "apparel"}
+
+GET /order_history/_search
+{
+  "query": {
+    "term" : {
+      "customer_id": "johndoe"
+    }
+  }
+}
+
+PUT /_search/pipeline/exclude_adult
+{
+  "request_processors": [
+    {
+      "filter_query" : {
+        "query" : {
+          "bool" : {
+            "must_not": [
+              {
+                "term" : {
+                  "category": "adult"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+
+GET /order_history/_search?search_pipeline=exclude_adult
+{
+  "query": {
+    "term" : {
+      "customer_id": "johndoe"
+    }
+  }
+}
+
+PUT /order_history/_settings 
+{
+  "index.default_search_pipeline" : "exclude_adult"
+}
+
+GET /order_history/_search
+{
+  "query": {
+    "term" : {
+      "customer_id": "johndoe"
+    }
+  }
+}
+
+PUT /_ingest/pipeline/rename_product_title
+{
+  "processors" : [
+    {
+      "rename" : {
+        "field" : "product_title",
+        "target_field" : "title",
+        "ignore_missing" : true
+      }
+    }
+  ]
+}
+
+PUT /order_history/_settings 
+{
+  "index.default_pipeline" : "rename_product_title"
+}
+
+POST /_bulk
+{ "index" : { "_index" : "order_history", "_id" : "234" } }
+{ "customer_id" : "johndoe", "product_title": "Lucene in Action","date" :"2023-04-15", "category" : "books"}
+
+GET /order_history/_search
+{
+  "query": {
+    "term" : {
+      "customer_id": "johndoe"
+    }
+  }
+}
+
+
+PUT /_search/pipeline/exclude_adult
+{
+  "request_processors": [
+
+    {
+      "filter_query" : {
+        "query" : {
+          "bool" : {
+            "must_not": [
+              {
+                "term" : {
+                  "category": "adult"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "response_processors": [
+    {
+      "rename" : {
+        "field" : "product_title",
+        "target_field" : "title"
+      }
+    }
+  ]
+}
+
+GET /order_history/_search
+{
+  "query": {
+    "term" : {
+      "customer_id": "johndoe"
+    }
+  }
+}
+
+
+GET /order_history/_search
+{
+  "query": {
+    "query_string": {
+      "query": "dog poop bags"
+    }
+  },
+  "search_pipeline" : {
+    "request_processors": [
+      {
+        "script" : {
+          "source": """
+            if (cxt.source['query'] != null) {
+              StringBuilder queryBuilder = new StringBuilder();
+              String[] terms = cxt.source['query'].splitOnToken(' ');
+              if (terms.length >= 2) {
+                for (int i = 1; i < terms.length; i++) {
+                  if (queryBuilder.length() > 0) {
+                    queryBuilder.append(' OR ');
+                  }
+                  queryBuilder.append('(').append(terms[i-1]).append(' AND ').append(terms[i]).append(')');
+                }
+                cxt.source['query'] = queryBuilder.toString();
+              }
+            }
+          """
+        }
+      },
+      {
+        "filter_query" : {
+          "query" : {
+            "bool" : {
+              "must_not": [
+                {
+                  "term" : {
+                    "category": "adult"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "response_processors": [
+      {
+        "redact" : {
+          "target" : [
+            "Poop",
+            "Fart",
+            "Potty"
+          ]
+        }
+      },
+      {
+        "rename" : {
+          "field" : "product_title",
+          "target_field" : "title"
+        }
+      },
+      {
+        "append_query" : {}
+      }
+    ]
+  }
+}
+
+GET /order_history/_search
+{
+  "query": {
+    "query_string": {
+      "query": "dog poop bags"
+    }
+  }
+}
+
+GET /order_history/_search?search_pipeline=_none
+{
+  "query": {
+    "query_string": {
+      "query": "imagination"
+    }
+  }
+}
+
