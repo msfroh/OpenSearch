@@ -23,6 +23,7 @@ import org.opensearch.cluster.AckedClusterStateUpdateTask;
 import org.opensearch.cluster.ClusterChangedEvent;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ClusterStateApplier;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterManagerTaskKeys;
@@ -30,11 +31,14 @@ import org.opensearch.cluster.service.ClusterManagerTaskThrottler;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.common.regex.Regex;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.gateway.GatewayService;
+import org.opensearch.index.IndexService;
+import org.opensearch.index.IndexSettings;
 import org.opensearch.index.analysis.AnalysisRegistry;
 import org.opensearch.ingest.ConfigurationUtils;
 import org.opensearch.node.ReportingService;
@@ -61,6 +65,7 @@ public class SearchPipelineService implements ClusterStateApplier, ReportingServ
 
     public static final String SEARCH_PIPELINE_ORIGIN = "search_pipeline";
     public static final String AD_HOC_PIPELINE_ID = "_ad_hoc_pipeline";
+    public static final String NOOP_PIPELINE_ID = "_none";
     private static final Logger logger = LogManager.getLogger(SearchPipelineService.class);
     private final ClusterService clusterService;
     private final ScriptService scriptService;
@@ -353,13 +358,26 @@ public class SearchPipelineService implements ClusterStateApplier, ReportingServ
             } catch (Exception e) {
                 throw new SearchPipelineProcessingException(e);
             }
-        } else if (searchRequest.pipeline() != null) {
-            String pipelineId = searchRequest.pipeline();
-            PipelineHolder pipelineHolder = pipelines.get(pipelineId);
-            if (pipelineHolder == null) {
-                throw new IllegalArgumentException("Pipeline " + pipelineId + " is not defined");
+        } else {
+            String pipelineId = NOOP_PIPELINE_ID;
+            if (searchRequest.pipeline() != null) {
+                pipelineId = searchRequest.pipeline();
+            } else if (searchRequest.indices() != null && searchRequest.indices().length == 1) {
+                IndexMetadata indexMetadata = state.metadata().index(searchRequest.indices()[0]);
+                if (indexMetadata != null) {
+                    Settings indexSettings = indexMetadata.getSettings();
+                    if (IndexSettings.DEFAULT_SEARCH_PIPELINE.exists(indexSettings)) {
+                        pipelineId = IndexSettings.DEFAULT_SEARCH_PIPELINE.get(indexSettings);
+                    }
+                }
             }
-            pipeline = pipelineHolder.pipeline;
+            if (NOOP_PIPELINE_ID.equals(pipelineId) == false) {
+                PipelineHolder pipelineHolder = pipelines.get(pipelineId);
+                if (pipelineHolder == null) {
+                    throw new IllegalArgumentException("Pipeline " + pipelineId + " is not defined");
+                }
+                pipeline = pipelineHolder.pipeline;
+            }
         }
         return pipeline;
     }

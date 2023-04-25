@@ -192,6 +192,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexMetadata.SETTING_WAIT_FOR_ACTIVE_SHARDS,
                 IndexSettings.DEFAULT_PIPELINE,
                 IndexSettings.FINAL_PIPELINE,
+                IndexSettings.DEFAULT_SEARCH_PIPELINE,
                 MetadataIndexStateService.VERIFIED_BEFORE_CLOSE_SETTING,
                 ExistingShardsAllocator.EXISTING_SHARDS_ALLOCATOR_SETTING,
                 IndexSettings.INDEX_MERGE_ON_FLUSH_ENABLED,

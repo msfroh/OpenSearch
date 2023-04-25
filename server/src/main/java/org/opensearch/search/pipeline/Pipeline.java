@@ -179,8 +179,8 @@ public class Pipeline {
         }
     }
 
-    static final Pipeline NO_OP_PIPELINE = new Pipeline(
-        "no_op",
+    public static final Pipeline NO_OP_PIPELINE = new Pipeline(
+        SearchPipelineService.NOOP_PIPELINE_ID,
         "Pipeline that does not transform anything",
         0,
         Collections.emptyList(),

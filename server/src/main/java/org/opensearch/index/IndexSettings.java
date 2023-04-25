@@ -51,6 +51,7 @@ import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.ingest.IngestService;
 import org.opensearch.node.Node;
+import org.opensearch.search.pipeline.SearchPipelineService;
 
 import java.util.Collections;
 import java.util.List;
@@ -497,6 +498,15 @@ public final class IndexSettings {
         Property.Dynamic,
         Property.IndexScope
     );
+
+    public static final Setting<String> DEFAULT_SEARCH_PIPELINE = new Setting<>(
+        "index.default_search_pipeline",
+        SearchPipelineService.NOOP_PIPELINE_ID,
+        Function.identity(),
+        Property.Dynamic,
+        Property.IndexScope
+    );
+
 
     /**
      * Marks an index to be searched throttled. This means that never more than one shard of such an index will be searched concurrently
