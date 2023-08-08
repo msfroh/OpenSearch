@@ -8,6 +8,7 @@
 
 package org.opensearch.index.mapper;
 
+import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexableField;
@@ -16,10 +17,10 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.Strings;
-import org.opensearch.core.xcontent.ToXContent;
-import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.common.xcontent.json.JsonXContent;
+import org.opensearch.core.xcontent.ToXContent;
+import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.index.query.QueryShardContext;
 
 import java.io.IOException;
@@ -119,12 +120,12 @@ public class FlatObjectFieldMapperTests extends MapperTestCase {
         // Test internal substring fields as well
         IndexableField[] fieldValues = doc.rootDoc().getFields("field" + VALUE_SUFFIX);
         assertEquals(2, fieldValues.length);
-        assertTrue(fieldValues[0] instanceof KeywordFieldMapper.KeywordField);
+        assertTrue(fieldValues[0] instanceof KeywordField);
         assertEquals(new BytesRef("bar"), fieldValues[0].binaryValue());
 
         IndexableField[] fieldValueAndPaths = doc.rootDoc().getFields("field" + VALUE_AND_PATH_SUFFIX);
         assertEquals(2, fieldValues.length);
-        assertTrue(fieldValueAndPaths[0] instanceof KeywordFieldMapper.KeywordField);
+        assertTrue(fieldValueAndPaths[0] instanceof KeywordField);
         assertEquals(new BytesRef("field.foo=bar"), fieldValueAndPaths[0].binaryValue());
     }
 

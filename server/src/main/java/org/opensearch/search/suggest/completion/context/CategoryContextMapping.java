@@ -32,6 +32,7 @@
 
 package org.opensearch.search.suggest.completion.context;
 
+import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
@@ -41,7 +42,6 @@ import org.opensearch.Version;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.core.xcontent.XContentParser.Token;
-import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.ParseContext;
 import org.opensearch.index.mapper.ParseContext.Document;
 
@@ -156,7 +156,7 @@ public class CategoryContextMapping extends ContextMapping<CategoryQueryContext>
             for (IndexableField field : fields) {
                 if (field instanceof SortedDocValuesField || field instanceof SortedSetDocValuesField || field instanceof StoredField) {
                     // Ignore doc values and stored fields
-                } else if (field instanceof KeywordFieldMapper.KeywordField) {
+                } else if (field instanceof KeywordField) {
                     values.add(field.binaryValue().utf8ToString());
                 } else if (field.stringValue() != null) {
                     values.add(field.stringValue());

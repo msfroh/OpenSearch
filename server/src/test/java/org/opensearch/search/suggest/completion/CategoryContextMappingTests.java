@@ -33,8 +33,8 @@
 package org.opensearch.search.suggest.completion;
 
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.IntPoint;
+import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
@@ -809,7 +809,7 @@ public class CategoryContextMappingTests extends OpenSearchSingleNodeTestCase {
         ParseContext.Document document = new ParseContext.Document();
 
         KeywordFieldMapper.KeywordFieldType keyword = new KeywordFieldMapper.KeywordFieldType("category");
-        document.add(new KeywordFieldMapper.KeywordField(keyword.name(), new BytesRef("category1"), new FieldType()));
+        document.add(new KeywordField(keyword.name(), new BytesRef("category1"), Field.Store.NO));
         // Ignore doc values
         document.add(new SortedSetDocValuesField(keyword.name(), new BytesRef("category1")));
         Set<String> context = mapping.parseContext(document);

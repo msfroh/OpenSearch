@@ -12,6 +12,7 @@ import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.Term;
@@ -29,10 +30,10 @@ import org.opensearch.common.Nullable;
 import org.opensearch.common.collect.Iterators;
 import org.opensearch.common.lucene.Lucene;
 import org.opensearch.common.lucene.search.AutomatonQueries;
+import org.opensearch.common.xcontent.JsonToStringXContentParser;
 import org.opensearch.core.xcontent.DeprecationHandler;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.core.xcontent.XContentParser;
-import org.opensearch.common.xcontent.JsonToStringXContentParser;
 import org.opensearch.index.analysis.NamedAnalyzer;
 import org.opensearch.index.fielddata.IndexFieldData;
 import org.opensearch.index.fielddata.plain.SortedSetOrdinalsIndexFieldData;
@@ -116,7 +117,7 @@ public final class FlatObjectFieldMapper extends DynamicKeyFieldMapper {
 
         /**
          * ValueFieldMapper is the subfield type for values in the Json.
-         * use a {@link KeywordFieldMapper.KeywordField}
+         * use a {@link KeywordField}
          */
         private ValueFieldMapper buildValueFieldMapper(BuilderContext context, FieldType fieldType, FlatObjectFieldType fft) {
             String fullName = buildFullName(context);
@@ -129,7 +130,7 @@ public final class FlatObjectFieldMapper extends DynamicKeyFieldMapper {
 
         /**
          * ValueAndPathFieldMapper is the subfield type for path=value format in the Json.
-         * also use a {@link KeywordFieldMapper.KeywordField}
+         * also use a {@link KeywordField}
          */
         private ValueAndPathFieldMapper buildValueAndPathFieldMapper(BuilderContext context, FieldType fieldType, FlatObjectFieldType fft) {
             String fullName = buildFullName(context);
@@ -686,7 +687,7 @@ public final class FlatObjectFieldMapper extends DynamicKeyFieldMapper {
         void addField(ParseContext context, String value) {
             final BytesRef binaryValue = new BytesRef(value);
             if (fieldType.indexOptions() != IndexOptions.NONE || fieldType.stored()) {
-                Field field = new KeywordFieldMapper.KeywordField(fieldType().name(), binaryValue, fieldType);
+                Field field = new KeywordField(fieldType().name(), binaryValue, fieldType.stored() ? Field.Store.YES : Field.Store.NO);
 
                 context.doc().add(field);
 
@@ -727,7 +728,7 @@ public final class FlatObjectFieldMapper extends DynamicKeyFieldMapper {
         void addField(ParseContext context, String value) {
             final BytesRef binaryValue = new BytesRef(value);
             if (fieldType.indexOptions() != IndexOptions.NONE || fieldType.stored()) {
-                Field field = new KeywordFieldMapper.KeywordField(fieldType().name(), binaryValue, fieldType);
+                Field field = new KeywordField(fieldType().name(), binaryValue, fieldType.stored() ? Field.Store.YES : Field.Store.NO);
                 context.doc().add(field);
 
                 if (fieldType().hasDocValues() == false && fieldType.omitNorms()) {

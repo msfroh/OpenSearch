@@ -36,10 +36,13 @@ import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.search.IndexOrDocValuesQuery;
 import org.apache.lucene.search.MultiTermQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.TermRangeQuery;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.lucene.Lucene;
@@ -85,19 +88,6 @@ public final class KeywordFieldMapper extends ParametrizedFieldMapper {
             FIELD_TYPE.setIndexOptions(IndexOptions.DOCS);
             FIELD_TYPE.freeze();
         }
-    }
-
-    /**
-     * The keyword field for the field mapper
-     *
-     * @opensearch.internal
-     */
-    public static class KeywordField extends Field {
-
-        public KeywordField(String field, BytesRef term, FieldType ft) {
-            super(field, term, ft);
-        }
-
     }
 
     private static KeywordFieldMapper toType(FieldMapper in) {
@@ -258,7 +248,7 @@ public final class KeywordFieldMapper extends ParametrizedFieldMapper {
                 name,
                 fieldType.indexOptions() != IndexOptions.NONE,
                 fieldType.stored(),
-                builder.hasDocValues.getValue(),
+                true, // Always has doc values
                 new TextSearchInfo(fieldType, builder.similarity.getValue(), searchAnalyzer, searchAnalyzer),
                 builder.meta.getValue()
             );
@@ -383,6 +373,71 @@ public final class KeywordFieldMapper extends ParametrizedFieldMapper {
             // query text
             return super.wildcardQuery(value, method, caseInsensitve, true, context);
         }
+
+        @Override
+        public Query termsQuery(List<?> values, QueryShardContext context) {
+            failIfNotIndexed();
+            BytesRef[] bytesRefs = new BytesRef[values.size()];
+            for (int i = 0; i < bytesRefs.length; i++) {
+                bytesRefs[i] = indexedValueForSearch(values.get(i));
+            }
+            return KeywordField.newSetQuery(name(), bytesRefs);
+        }
+
+        @Override
+        public Query prefixQuery(String value, MultiTermQuery.RewriteMethod method, boolean caseInsensitive, QueryShardContext context) {
+            Query indexQuery = super.prefixQuery(value, method, caseInsensitive, context);
+            Query dvQuery = super.prefixQuery(value, MultiTermQuery.DOC_VALUES_REWRITE, caseInsensitive, context);
+            return new IndexOrDocValuesQuery(indexQuery, dvQuery);
+        }
+
+        @Override
+        public Query normalizedWildcardQuery(String value, MultiTermQuery.RewriteMethod method, QueryShardContext context) {
+            Query indexQuery = super.normalizedWildcardQuery(value, method, context);
+            Query dvQuery = super.normalizedWildcardQuery(value, MultiTermQuery.DOC_VALUES_REWRITE, context);
+            return new IndexOrDocValuesQuery(indexQuery, dvQuery);
+        }
+
+        @Override
+        public Query regexpQuery(
+            String value,
+            int syntaxFlags,
+            int matchFlags,
+            int maxDeterminizedStates,
+            MultiTermQuery.RewriteMethod method,
+            QueryShardContext context
+        ) {
+            Query indexQuery = super.regexpQuery(value, syntaxFlags, matchFlags, maxDeterminizedStates, method, context);
+            Query dvQuery = super.regexpQuery(
+                value,
+                syntaxFlags,
+                matchFlags,
+                maxDeterminizedStates,
+                MultiTermQuery.DOC_VALUES_REWRITE,
+                context
+            );
+            return new IndexOrDocValuesQuery(indexQuery, dvQuery);
+        }
+
+        @Override
+        public Query rangeQuery(Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper, QueryShardContext context) {
+            Query indexQuery = new TermRangeQuery(
+                name(),
+                lowerTerm == null ? null : indexedValueForSearch(lowerTerm),
+                upperTerm == null ? null : indexedValueForSearch(upperTerm),
+                includeLower,
+                includeUpper
+            );
+            Query dvQuery = new TermRangeQuery(
+                name(),
+                lowerTerm == null ? null : indexedValueForSearch(lowerTerm),
+                upperTerm == null ? null : indexedValueForSearch(upperTerm),
+                includeLower,
+                includeUpper,
+                MultiTermQuery.DOC_VALUES_REWRITE
+            );
+            return new IndexOrDocValuesQuery(indexQuery, dvQuery);
+        }
     }
 
     private final boolean indexed;
@@ -464,7 +519,7 @@ public final class KeywordFieldMapper extends ParametrizedFieldMapper {
         // convert to utf8 only once before feeding postings/dv/stored fields
         final BytesRef binaryValue = new BytesRef(value);
         if (fieldType.indexOptions() != IndexOptions.NONE || fieldType.stored()) {
-            Field field = new KeywordField(fieldType().name(), binaryValue, fieldType);
+            Field field = new KeywordField(fieldType().name(), binaryValue, fieldType.stored() ? Field.Store.YES : Field.Store.NO);
             context.doc().add(field);
 
             if (fieldType().hasDocValues() == false && fieldType.omitNorms()) {
