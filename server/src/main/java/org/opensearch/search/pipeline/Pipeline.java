@@ -16,6 +16,7 @@ import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.io.stream.BytesStreamOutput;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.NamedWriteableAwareStreamInput;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -165,18 +166,54 @@ class Pipeline {
         return request;
     }
 
-    SearchResponse transformResponse(SearchRequest request, SearchResponse response) throws SearchPipelineProcessingException {
-        if (searchResponseProcessors.isEmpty() == false) {
-            long pipelineStart = relativeTimeSupplier.getAsLong();
-            beforeTransformResponse();
-            try {
-                for (SearchResponseProcessor processor : searchResponseProcessors) {
+    private void applyOneResponseProcessor(SearchRequest request, SearchResponse response, ActionListener<SearchResponse> finalResponseListener, int processorNumber) {
+        if (processorNumber == searchResponseProcessors.size()) {
+            finalResponseListener.onResponse(response);
+        }
+        beforeTransformResponse();
+        long start = relativeTimeSupplier.getAsLong();
+
+    }
+
+    ActionListener<SearchResponse> transformResponseListener(SearchRequest request, ActionListener<SearchResponse> responseListener) {
+        if (searchResponseProcessors.isEmpty()) {
+            // No response transformation necessary
+            return responseListener;
+        }
+
+        long[] pipelineStart = new long[1];
+
+        final ActionListener<SearchResponse> originalListener = responseListener;
+        responseListener = ActionListener.wrap(
+            r -> {
+                long took = TimeUnit.NANOSECONDS.toMillis(relativeTimeSupplier.getAsLong() - pipelineStart[0]);
+                afterTransformResponse(took);
+                originalListener.onResponse(r);
+            },
+            e -> {
+                long took = TimeUnit.NANOSECONDS.toMillis(relativeTimeSupplier.getAsLong() - pipelineStart[0]);
+                afterTransformResponse(took);
+                onTransformResponseFailure();
+                originalListener.onFailure(e);
+            }
+        );
+
+        for (int i = searchResponseProcessors.size() - 1; i >=0; i--) {
+            final ActionListener<SearchResponse> currentFinalListener = responseListener;
+            final SearchResponseProcessor processor = searchResponseProcessors.get(i);
+
+            responseListener = ActionListener.wrap(
+                r -> {
                     beforeResponseProcessor(processor);
-                    long start = relativeTimeSupplier.getAsLong();
-                    try {
-                        response = processor.processResponse(request, response);
-                    } catch (Exception e) {
+                    final long start = relativeTimeSupplier.getAsLong();
+                    processor.asyncProcessResponse(request, r, ActionListener.wrap(rr -> {
+                        long took = TimeUnit.NANOSECONDS.toMillis(relativeTimeSupplier.getAsLong() - start);
+                        afterResponseProcessor(processor, took);
+                        currentFinalListener.onResponse(rr);
+                    }, e -> {
                         onResponseProcessorFailed(processor);
+                        long took = TimeUnit.NANOSECONDS.toMillis(relativeTimeSupplier.getAsLong() - start);
+                        afterResponseProcessor(processor, took);
                         if (processor.isIgnoreFailure()) {
                             logger.warn(
                                 "The exception from response processor ["
@@ -186,23 +223,24 @@ class Pipeline {
                                     + "] was ignored",
                                 e
                             );
+                            // Pass the previous response through to the next processor in the chain
+                            currentFinalListener.onResponse(r);
                         } else {
-                            throw e;
+                            currentFinalListener.onFailure(new SearchPipelineProcessingException(e));
                         }
-                    } finally {
-                        long took = TimeUnit.NANOSECONDS.toMillis(relativeTimeSupplier.getAsLong() - start);
-                        afterResponseProcessor(processor, took);
-                    }
-                }
-            } catch (Exception e) {
-                onTransformResponseFailure();
-                throw new SearchPipelineProcessingException(e);
-            } finally {
-                long took = TimeUnit.NANOSECONDS.toMillis(relativeTimeSupplier.getAsLong() - pipelineStart);
-                afterTransformResponse(took);
-            }
+                    }));
+                },
+                currentFinalListener::onFailure
+            );
         }
-        return response;
+        final ActionListener<SearchResponse> chainListener = responseListener;
+        return ActionListener.wrap(r -> {
+            beforeTransformResponse();
+            pipelineStart[0] = relativeTimeSupplier.getAsLong();
+            chainListener.onResponse(r);
+        },
+            originalListener::onFailure);
+
     }
 
     <Result extends SearchPhaseResult> void runSearchPhaseResultsTransformer(

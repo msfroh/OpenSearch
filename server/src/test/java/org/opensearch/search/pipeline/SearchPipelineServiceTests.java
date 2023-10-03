@@ -41,6 +41,7 @@ import org.opensearch.common.metrics.OperationStats;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.concurrent.AtomicArray;
 import org.opensearch.common.util.concurrent.OpenSearchExecutors;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.breaker.NoopCircuitBreaker;
 import org.opensearch.core.common.bytes.BytesArray;
@@ -66,7 +67,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 import static org.mockito.ArgumentMatchers.anyString;
@@ -641,17 +645,33 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
         // First try without specifying a pipeline, which should be a no-op.
         SearchRequest searchRequest = new SearchRequest();
         PipelinedRequest pipelinedRequest = searchPipelineService.resolvePipeline(searchRequest);
-        SearchResponse notTransformedResponse = pipelinedRequest.transformResponse(searchResponse);
+        SearchResponse notTransformedResponse = syncTransformResponse(pipelinedRequest, searchResponse);
         assertSame(searchResponse, notTransformedResponse);
 
         // Now apply a pipeline
         searchRequest = new SearchRequest().pipeline("p1");
         pipelinedRequest = searchPipelineService.resolvePipeline(searchRequest);
-        SearchResponse transformedResponse = pipelinedRequest.transformResponse(searchResponse);
+        SearchResponse transformedResponse = syncTransformResponse(pipelinedRequest, searchResponse);
         assertEquals(size, transformedResponse.getHits().getHits().length);
         for (int i = 0; i < size; i++) {
             assertEquals(2.0, transformedResponse.getHits().getHits()[i].getScore(), 0.0001f);
         }
+    }
+
+    private static SearchResponse syncTransformResponse(PipelinedRequest pipelinedRequest, SearchResponse searchResponse) throws Exception {
+        SearchResponse[] responseBox = new SearchResponse[1];
+        Exception[] exceptionBox = new Exception[1];
+        ActionListener<SearchResponse> responseListener = pipelinedRequest.transformResponseListener(ActionListener.wrap(r -> {
+            responseBox[0] = r;
+        }, e -> {
+            exceptionBox[0] = e;
+        }));
+        responseListener.onResponse(searchResponse);
+
+        if (exceptionBox[0] != null) {
+            throw exceptionBox[0];
+        }
+        return responseBox[0];
     }
 
     public void testTransformSearchPhase() {
@@ -894,7 +914,7 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
         SearchResponseSections searchResponseSections = new SearchResponseSections(searchHits, null, null, false, false, null, 0);
         SearchResponse searchResponse = new SearchResponse(searchResponseSections, null, 1, 1, 0, 10, null, null);
 
-        SearchResponse transformedResponse = pipeline.transformResponse(searchRequest, searchResponse);
+        SearchResponse transformedResponse = syncTransformResponse(pipelinedRequest, searchResponse);
         for (int i = 0; i < size; i++) {
             assertEquals(2.0, transformedResponse.getHits().getHits()[i].getScore(), 0.0001);
         }
@@ -974,7 +994,7 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
 
         SearchResponse response = new SearchResponse(null, null, 0, 0, 0, 0, null, null);
         // Exception thrown when processing response
-        expectThrows(SearchPipelineProcessingException.class, () -> pipelinedRequest.transformResponse(response));
+        expectThrows(SearchPipelineProcessingException.class, () -> syncTransformResponse(pipelinedRequest, response));
     }
 
     public void testCatchExceptionOnRequestProcessing() throws IllegalAccessException {
@@ -1048,7 +1068,7 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
                     "The exception from response processor [throwing_response] in the search pipeline [_ad_hoc_pipeline] was ignored"
                 )
             );
-            pipelinedRequest.transformResponse(response);
+            syncTransformResponse(pipelinedRequest, response);
             mockAppender.assertAllExpectationsMatched();
         }
     }
@@ -1078,15 +1098,15 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
         SearchRequest request = new SearchRequest();
         SearchResponse response = new SearchResponse(null, null, 0, 0, 0, 0, null, null);
 
-        searchPipelineService.resolvePipeline(request.pipeline("good_request_pipeline")).transformResponse(response);
+        syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("good_request_pipeline")), response);
         expectThrows(
             SearchPipelineProcessingException.class,
-            () -> searchPipelineService.resolvePipeline(request.pipeline("bad_request_pipeline")).transformResponse(response)
+            () -> syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("bad_request_pipeline")), response)
         );
-        searchPipelineService.resolvePipeline(request.pipeline("good_response_pipeline")).transformResponse(response);
+        syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("good_response_pipeline")), response);
         expectThrows(
             SearchPipelineProcessingException.class,
-            () -> searchPipelineService.resolvePipeline(request.pipeline("bad_response_pipeline")).transformResponse(response)
+            () -> syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("bad_response_pipeline")), response)
         );
 
         SearchPipelineStats stats = searchPipelineService.stats();
@@ -1164,12 +1184,12 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
         SearchRequest request = new SearchRequest();
         SearchResponse response = new SearchResponse(null, null, 0, 0, 0, 0, null, null);
 
-        searchPipelineService.resolvePipeline(request.pipeline("good_request_pipeline")).transformResponse(response);
+        syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("good_request_pipeline")), response);
         // Caught Exception here
-        searchPipelineService.resolvePipeline(request.pipeline("bad_request_pipeline")).transformResponse(response);
-        searchPipelineService.resolvePipeline(request.pipeline("good_response_pipeline")).transformResponse(response);
+        syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("bad_request_pipeline")), response);
+        syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("good_response_pipeline")), response);
         // Caught Exception here
-        searchPipelineService.resolvePipeline(request.pipeline("bad_response_pipeline")).transformResponse(response);
+        syncTransformResponse(searchPipelineService.resolvePipeline(request.pipeline("bad_response_pipeline")), response);
 
         // when ignoreFailure enabled, the search pipelines will all succeed.
         SearchPipelineStats stats = searchPipelineService.stats();
@@ -1273,8 +1293,8 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
     }
 
     private static void assertPipelineStats(OperationStats stats, long count, long failed) {
-        assertEquals(stats.getCount(), count);
-        assertEquals(stats.getFailedCount(), failed);
+        assertEquals(count, stats.getCount());
+        assertEquals(failed, stats.getFailedCount());
     }
 
     public void testAdHocRejectingProcessor() {
