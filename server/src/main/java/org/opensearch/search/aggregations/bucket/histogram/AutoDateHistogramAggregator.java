@@ -59,7 +59,6 @@ import org.opensearch.search.aggregations.bucket.DeferringBucketCollector;
 import org.opensearch.search.aggregations.bucket.MergingBucketsDeferringCollector;
 import org.opensearch.search.aggregations.bucket.histogram.AutoDateHistogramAggregationBuilder.RoundingInfo;
 import org.opensearch.search.aggregations.bucket.terms.LongKeyedBucketOrds;
-import org.opensearch.search.aggregations.support.FieldContext;
 import org.opensearch.search.aggregations.support.ValuesSource;
 import org.opensearch.search.aggregations.support.ValuesSourceConfig;
 import org.opensearch.search.internal.SearchContext;
@@ -131,8 +130,8 @@ abstract class AutoDateHistogramAggregator extends DeferableBucketAggregator {
      * {@link MergingBucketsDeferringCollector#mergeBuckets(long[])}.
      */
     private MergingBucketsDeferringCollector deferringCollector;
-    private Weight[] filters = null;
-    private DateFieldMapper.DateFieldType fieldType;
+    private final Weight[] filters;
+    private final DateFieldMapper.DateFieldType fieldType;
 
     protected final RoundingInfo[] roundingInfos;
     protected final int targetBuckets;
@@ -162,25 +161,21 @@ abstract class AutoDateHistogramAggregator extends DeferableBucketAggregator {
 
         // Create the filters for fast aggregation only if the query is instance
         // of point range query and there aren't any parent/sub aggregations
-        if (parent() == null && subAggregators.length == 0 && valuesSourceConfig.missing() == null && valuesSourceConfig.script() == null) {
-            final FieldContext fieldContext = valuesSourceConfig.fieldContext();
-            if (fieldContext != null) {
-                final String fieldName = fieldContext.field();
-                final long[] bounds = FilterRewriteHelper.getAggregationBounds(context, fieldName);
-                if (bounds != null) {
-                    assert fieldContext.fieldType() instanceof DateFieldMapper.DateFieldType;
-                    fieldType = (DateFieldMapper.DateFieldType) fieldContext.fieldType();
-                    filters = FilterRewriteHelper.createFilterForAggregations(
-                        context,
-                        getMinimumRounding(bounds[0], bounds[1]),
-                        preparedRounding,
-                        fieldName,
-                        fieldType,
-                        bounds[0],
-                        bounds[1]
-                    );
-                }
-            }
+        DateHistogramAggregator.FilterContext filterContext = DateHistogramAggregator.buildFastFilterContext(
+            parent(),
+            subAggregators,
+            context,
+            b -> getMinimumRounding(b[0], b[1]),
+            preparedRounding,
+            valuesSourceConfig,
+            fc -> FilterRewriteHelper.getAggregationBounds(context, fc.field())
+        );
+        if (filterContext != null) {
+            fieldType = filterContext.fieldType;
+            filters = filterContext.filters;
+        } else {
+            fieldType = null;
+            filters = null;
         }
     }
 

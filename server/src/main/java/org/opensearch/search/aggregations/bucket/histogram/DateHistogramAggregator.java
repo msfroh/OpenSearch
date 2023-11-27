@@ -39,6 +39,7 @@ import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.NumericUtils;
+import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.Rounding;
 import org.opensearch.common.lease.Releasables;
@@ -62,6 +63,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 
 /**
  * An aggregator for date values. Every date is rounded down using a configured
@@ -84,9 +86,9 @@ class DateHistogramAggregator extends BucketsAggregator implements SizedBucketAg
     private final long minDocCount;
     private final LongBounds extendedBounds;
     private final LongBounds hardBounds;
-    private Weight[] filters = null;
+    private final Weight[] filters;
     private final LongKeyedBucketOrds bucketOrds;
-    private DateFieldMapper.DateFieldType fieldType;
+    private final DateFieldMapper.DateFieldType fieldType;
 
     DateHistogramAggregator(
         String name,
@@ -121,33 +123,78 @@ class DateHistogramAggregator extends BucketsAggregator implements SizedBucketAg
 
         // Create the filters for fast aggregation only if the query is instance
         // of point range query and there aren't any parent/sub aggregations
-        if (parent() == null && subAggregators.length == 0 && valuesSourceConfig.missing() == null && valuesSourceConfig.script() == null) {
+        FilterContext filterContext = buildFastFilterContext(
+            parent,
+            subAggregators,
+            context,
+            x -> rounding,
+            preparedRounding,
+            valuesSourceConfig,
+            this::computeBounds
+        );
+        if (filterContext != null) {
+            fieldType = filterContext.fieldType;
+            filters = filterContext.filters;
+        } else {
+            filters = null;
+            fieldType = null;
+        }
+    }
+
+    static class FilterContext {
+        final DateFieldMapper.DateFieldType fieldType;
+        final Weight[] filters;
+
+        public FilterContext(DateFieldMapper.DateFieldType fieldType, Weight[] filters) {
+            this.fieldType = fieldType;
+            this.filters = filters;
+        }
+    }
+
+    private long[] computeBounds(FieldContext fieldContext) throws IOException {
+        final long[] bounds = FilterRewriteHelper.getAggregationBounds(context, fieldContext.field());
+        if (bounds != null) {
+            // Update min/max limit if user specified any hard bounds
+            if (hardBounds != null) {
+                bounds[0] = Math.max(bounds[0], hardBounds.getMin());
+                bounds[1] = Math.min(bounds[1], hardBounds.getMax() - 1); // hard bounds max is exclusive
+            }
+        }
+        return bounds;
+    }
+
+    static FilterContext buildFastFilterContext(
+        Aggregator parent,
+        Aggregator[] subAggregators,
+        SearchContext context,
+        Function<long[], Rounding> roundingFunction,
+        Rounding.Prepared preparedRounding,
+        ValuesSourceConfig valuesSourceConfig,
+        CheckedFunction<FieldContext, long[], IOException> computeBounds
+    ) throws IOException {
+        if (parent == null && subAggregators.length == 0 && valuesSourceConfig.missing() == null && valuesSourceConfig.script() == null) {
             final FieldContext fieldContext = valuesSourceConfig.fieldContext();
             if (fieldContext != null) {
                 final String fieldName = fieldContext.field();
-                final long[] bounds = FilterRewriteHelper.getAggregationBounds(context, fieldName);
+                final long[] bounds = computeBounds.apply(fieldContext);
                 if (bounds != null) {
                     assert fieldContext.fieldType() instanceof DateFieldMapper.DateFieldType;
-                    fieldType = (DateFieldMapper.DateFieldType) fieldContext.fieldType();
+                    DateFieldMapper.DateFieldType fieldType = (DateFieldMapper.DateFieldType) fieldContext.fieldType();
 
-                    // Update min/max limit if user specified any hard bounds
-                    if (hardBounds != null) {
-                        bounds[0] = Math.max(bounds[0], hardBounds.getMin());
-                        bounds[1] = Math.min(bounds[1], hardBounds.getMax() - 1); // hard bounds max is exclusive
-                    }
-
-                    filters = FilterRewriteHelper.createFilterForAggregations(
+                    Weight[] filters = FilterRewriteHelper.createFilterForAggregations(
                         context,
-                        rounding,
+                        roundingFunction.apply(bounds),
                         preparedRounding,
                         fieldName,
                         fieldType,
                         bounds[0],
                         bounds[1]
                     );
+                    return new FilterContext(fieldType, filters);
                 }
             }
         }
+        return null;
     }
 
     @Override
