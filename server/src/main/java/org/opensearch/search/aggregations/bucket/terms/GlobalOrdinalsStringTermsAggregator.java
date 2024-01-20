@@ -37,11 +37,18 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
+import org.apache.lucene.index.Terms;
+import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.CollectionTerminatedException;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefArray;
 import org.apache.lucene.util.PriorityQueue;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lease.Releasables;
+import org.opensearch.common.util.BytesRefHash;
 import org.opensearch.common.util.LongArray;
 import org.opensearch.common.util.LongHash;
 import org.opensearch.core.common.io.stream.StreamOutput;
@@ -71,8 +78,8 @@ import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.LongUnaryOperator;
 
-import static org.opensearch.search.aggregations.InternalOrder.isKeyOrder;
 import static org.apache.lucene.index.SortedSetDocValues.NO_MORE_ORDS;
+import static org.opensearch.search.aggregations.InternalOrder.isKeyOrder;
 
 /**
  * An aggregator of string values that relies on global ordinals in order to build buckets.
@@ -89,6 +96,8 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
     protected final CollectionStrategy collectionStrategy;
     protected int segmentsWithSingleValuedOrds = 0;
     protected int segmentsWithMultiValuedOrds = 0;
+
+    private final String fieldName;
 
     /**
      * Lookup global ordinals
@@ -114,7 +123,8 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
         SubAggCollectionMode collectionMode,
         boolean showTermDocCountError,
         CardinalityUpperBound cardinality,
-        Map<String, Object> metadata
+        Map<String, Object> metadata,
+        String fieldName
     ) throws IOException {
         super(name, factories, context, parent, order, format, bucketCountThresholds, collectionMode, showTermDocCountError, metadata);
         this.resultStrategy = resultStrategy.apply(this); // ResultStrategy needs a reference to the Aggregator to do its job.
@@ -136,6 +146,7 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                 return new DenseGlobalOrds();
             });
         }
+        this.fieldName = fieldName;
     }
 
     String descriptCollectionStrategy() {
@@ -146,10 +157,41 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
     public LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
         SortedSetDocValues globalOrds = valuesSource.globalOrdinalsValues(ctx);
         collectionStrategy.globalOrdsReady(globalOrds);
+        Weight weight = context.searcher().createWeight(context.query(), ScoreMode.COMPLETE_NO_SCORES, 1f);
+        if (collectionStrategy instanceof DenseGlobalOrds && weight.count(ctx) == ctx.reader().maxDoc()) {
+            Terms aggTerms = ctx.reader().terms(this.fieldName);
+            if (aggTerms != null) {
+                TermsEnum indexTermsEnum = aggTerms.iterator();
+                BytesRef indexTerm = indexTermsEnum.next();
+                TermsEnum ordinalTermsEnum = globalOrds.termsEnum();
+                BytesRef ordinalTerm = ordinalTermsEnum.next();
+                while (indexTerm != null && ordinalTerm != null) {
+                    int compare = indexTerm.compareTo(ordinalTerm);
+                    if (compare == 0) {
+                        incrementBucketDocCount(collectionStrategy.globalOrdToBucketOrd(0, ordinalTermsEnum.ord()), indexTermsEnum.docFreq());
+                        indexTerm = indexTermsEnum.next();
+                        ordinalTerm = ordinalTermsEnum.next();
+                    } else if (compare < 0) {
+                        indexTerm = indexTermsEnum.next();
+                    } else {
+                        ordinalTerm = ordinalTermsEnum.next();
+                    }
+                }
+                return new LeafBucketCollector() {
+                    @Override
+                    public void collect(int doc, long owningBucketOrd) throws IOException {
+                        throw new CollectionTerminatedException();
+                    }
+                };
+            }
+        }
+
         SortedDocValues singleValues = DocValues.unwrapSingleton(globalOrds);
         if (singleValues != null) {
             segmentsWithSingleValuedOrds++;
+
             if (acceptedGlobalOrdinals == ALWAYS_TRUE) {
+
                 /*
                  * Optimize when there isn't a filter because that is very
                  * common and marginally faster.
@@ -312,7 +354,8 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
             boolean remapGlobalOrds,
             SubAggCollectionMode collectionMode,
             boolean showTermDocCountError,
-            Map<String, Object> metadata
+            Map<String, Object> metadata,
+            String fieldName
         ) throws IOException {
             super(
                 name,
@@ -329,7 +372,8 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                 collectionMode,
                 showTermDocCountError,
                 CardinalityUpperBound.ONE,
-                metadata
+                metadata,
+                fieldName
             );
             assert factories == null || factories.countAggregators() == 0;
             this.segmentDocCounts = context.bigArrays().newLongArray(1, true);

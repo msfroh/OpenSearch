@@ -61,6 +61,7 @@ interface SignificantTermsAggregatorSupplier {
         SignificanceHeuristic significanceHeuristic,
         SignificanceLookup lookup,
         CardinalityUpperBound cardinality,
-        Map<String, Object> metadata
+        Map<String, Object> metadata,
+        String fieldName
     ) throws IOException;
 }
