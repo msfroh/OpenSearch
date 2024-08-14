@@ -52,6 +52,7 @@ import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.core.indices.breaker.CircuitBreakerService;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.core.xcontent.XContentParser;
+import org.opensearch.http.ClientListenerTransport;
 import org.opensearch.http.HttpServerTransport;
 import org.opensearch.index.shard.PrimaryReplicaSyncer.ResyncTask;
 import org.opensearch.plugins.NetworkPlugin;
@@ -157,6 +158,7 @@ public final class NetworkModule {
 
     private final Map<String, Supplier<Transport>> transportFactories = new HashMap<>();
     private final Map<String, Supplier<HttpServerTransport>> transportHttpFactories = new HashMap<>();
+    private final Map<String, Supplier<ClientListenerTransport>> clientListenerTransportactories = new HashMap<>();
     private final List<TransportInterceptor> transportInterceptors = new ArrayList<>();
 
     /**
@@ -220,6 +222,11 @@ public final class NetworkModule {
             );
             for (Map.Entry<String, Supplier<HttpServerTransport>> entry : httpTransportFactory.entrySet()) {
                 registerHttpTransport(entry.getKey(), entry.getValue());
+            }
+
+            Map<String, Supplier<ClientListenerTransport>> clientListenerTransportFactory = plugin.getClientListenerTransports();
+            for (Map.Entry<String, Supplier<ClientListenerTransport>> entry : clientListenerTransportFactory.entrySet()) {
+                clientListenerTransportactories.put(entry.getKey(), entry.getValue());
             }
 
             Map<String, Supplier<Transport>> transportFactory = plugin.getTransports(
@@ -358,6 +365,11 @@ public final class NetworkModule {
             throw new IllegalStateException("Unsupported transport.type [" + name + "]");
         }
         return factory;
+    }
+
+    public Supplier<ClientListenerTransport> getClientListenerTransportSupplier() {
+        final String type = "grpc";
+        return clientListenerTransportactories.get(type);
     }
 
     /**
