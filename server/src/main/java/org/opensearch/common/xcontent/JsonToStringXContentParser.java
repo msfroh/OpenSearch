@@ -87,14 +87,14 @@ public class JsonToStringXContentParser extends AbstractXContentParser {
     /**
      * @return true if the child object contains no_null value, false otherwise
      */
-    private boolean parseToken(Deque<String> path, String currentFieldName) throws IOException {
+    private boolean parseToken(Deque<String> path) throws IOException {
         if (path.size() == 1 && processNoNestedValue()) {
             return true;
         }
         boolean isChildrenValueValid = false;
         boolean visitFieldName = false;
         if (this.parser.currentToken() == Token.FIELD_NAME) {
-            currentFieldName = this.parser.currentName();
+            String currentFieldName = this.parser.currentName();
             path.addLast(currentFieldName); // Pushing onto the stack *must* be matched by pop
             visitFieldName = true;
             String parts = currentFieldName;
@@ -106,7 +106,7 @@ public class JsonToStringXContentParser extends AbstractXContentParser {
             }
             this.keyList.add(parts); // parts has no dot, so either it's the original fieldName or it's the last part
             this.parser.nextToken(); // advance to the value of fieldName
-            isChildrenValueValid = parseToken(path, currentFieldName); // parse the value for fieldName (which will be an array, an object,
+            isChildrenValueValid = parseToken(path); // parse the value for fieldName (which will be an array, an object,
                                                                        // or a primitive value)
             path.removeLast(); // Here is where we pop fieldName from the stack (since we're done with the value of fieldName)
             // Note that whichever other branch we just passed through has already ended with nextToken(), so we
@@ -114,7 +114,7 @@ public class JsonToStringXContentParser extends AbstractXContentParser {
         } else if (this.parser.currentToken() == Token.START_ARRAY) {
             parser.nextToken();
             while (this.parser.currentToken() != Token.END_ARRAY) {
-                isChildrenValueValid |= parseToken(path, currentFieldName);
+                isChildrenValueValid |= parseToken(path);
             }
             this.parser.nextToken();
         } else if (this.parser.currentToken() == Token.END_ARRAY) {
@@ -122,7 +122,7 @@ public class JsonToStringXContentParser extends AbstractXContentParser {
         } else if (this.parser.currentToken() == Token.START_OBJECT) {
             parser.nextToken();
             while (this.parser.currentToken() != Token.END_OBJECT) {
-                isChildrenValueValid |= parseToken(path, currentFieldName);
+                isChildrenValueValid |= parseToken(path);
             }
             this.parser.nextToken();
         } else {
