@@ -26,7 +26,7 @@ import java.nio.CharBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 
 /**
@@ -76,9 +76,9 @@ public class JsonToStringXContentParser extends AbstractXContentParser {
             parseToken(path, null);
         }
         // deduplication the fieldName,valueList,valueAndPathList
-        builder.field(this.fieldTypeName, new HashSet<>(keyList));
-        builder.field(this.fieldTypeName + VALUE_SUFFIX, new HashSet<>(valueList));
-        builder.field(this.fieldTypeName + VALUE_AND_PATH_SUFFIX, new HashSet<>(valueAndPathList));
+        builder.field(this.fieldTypeName, new LinkedHashSet<>(keyList));
+        builder.field(this.fieldTypeName + VALUE_SUFFIX, new LinkedHashSet<>(valueList));
+        builder.field(this.fieldTypeName + VALUE_AND_PATH_SUFFIX, new LinkedHashSet<>(valueAndPathList));
         builder.endObject();
         String jString = XContentHelper.convertToJson(BytesReference.bytes(builder), false, MediaTypeRegistry.JSON);
         return JsonXContent.jsonXContent.createParser(this.xContentRegistry, this.deprecationHandler, String.valueOf(jString));

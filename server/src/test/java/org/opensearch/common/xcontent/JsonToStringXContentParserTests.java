@@ -49,9 +49,9 @@ public class JsonToStringXContentParserTests extends OpenSearchTestCase {
 
         assertEquals(
             "{"
-                + "\"flat\":[\"third\",\"inner\",\"first\",\"second\"],"
+                + "\"flat\":[\"first\",\"second\",\"inner\",\"third\"],"
                 + "\"flat._value\":[\"1\",\"2.0\",\"three\"],"
-                + "\"flat._valueAndPath\":[\"flat.second.inner=2.0\",\"flat.first=1\",\"flat.third=three\"]"
+                + "\"flat._valueAndPath\":[\"flat.first=1\",\"flat.second.inner=2.0\",\"flat.third=three\"]"
                 + "}",
             flattenJsonString("flat", jsonExample)
         );
@@ -64,9 +64,9 @@ public class JsonToStringXContentParserTests extends OpenSearchTestCase {
 
         assertEquals(
             "{"
-                + "\"flat\":[\"third\",\"inner\",\"first\",\"second\"],"
+                + "\"flat\":[\"first\",\"second\",\"inner\",\"third\"],"
                 + "\"flat._value\":[\"1\",\"2.0\",\"three\"],"
-                + "\"flat._valueAndPath\":[\"flat.second.inner=2.0\",\"flat.first=1\",\"flat.third=three\"]"
+                + "\"flat._valueAndPath\":[\"flat.first=1\",\"flat.second.inner=2.0\",\"flat.third=three\"]"
                 + "}",
             flattenJsonString("flat", jsonExample)
         );
@@ -83,7 +83,7 @@ public class JsonToStringXContentParserTests extends OpenSearchTestCase {
 
         assertEquals(
             "{"
-                + "\"flat\":[\"really_inner\",\"third\",\"inner\",\"first\",\"second\"],"
+                + "\"flat\":[\"first\",\"second\",\"inner\",\"really_inner\",\"third\"],"
                 + "\"flat._value\":[\"1\",\"2.0\",\"three\"],"
                 + "\"flat._valueAndPath\":[\"flat.first=1\",\"flat.second.inner.really_inner=2.0\",\"flat.third=three\"]"
                 + "}",
@@ -102,7 +102,7 @@ public class JsonToStringXContentParserTests extends OpenSearchTestCase {
 
         assertEquals(
             "{"
-                + "\"flat\":[\"third\",\"absolutely\",\"totally\",\"inner\",\"first\",\"second\"],"
+                + "\"flat\":[\"first\",\"second\",\"inner\",\"totally\",\"absolutely\",\"inner\",\"third\"],"
                 + "\"flat._value\":[\"1\",\"2.0\",\"three\"],"
                 + "\"flat._valueAndPath\":[\"flat.first=1\",\"flat.second.inner.totally.absolutely.inner=2.0\",\"flat.third=three\"]"
                 + "}",
@@ -123,8 +123,8 @@ public class JsonToStringXContentParserTests extends OpenSearchTestCase {
 
         assertEquals(
             "{"
-                + "\"flat\":[\"field\",\"name\",\"detail\",\"foooooooooooo\"],"
-                + "\"flat._value\":[\"baz\"],"
+                + "\"flat\":[\"field\",\"detail\",\"foooooooooooo\",\"name\",\"name\"],"
+                + "\"flat._value\":[\"baz\",\"baz\"],"
                 + "\"flat._valueAndPath\":["
                 + "\"flat.field.detail.foooooooooooo.name=baz\""
                 + "]}",
@@ -150,13 +150,13 @@ public class JsonToStringXContentParserTests extends OpenSearchTestCase {
 
         assertEquals(
             "{"
-                + "\"flat\":[\"field\",\"name\",\"numbers\",\"detail\",\"foooooooooooo\"],"
-                + "\"flat._value\":[\"1\",\"2\",\"3\",\"baz\"],"
+                + "\"flat\":[\"field\",\"detail\",\"foooooooooooo\",\"name\",\"numbers\"],"
+                + "\"flat._value\":[\"baz\",\"baz\",\"1\",\"2\",\"3\"],"
                 + "\"flat._valueAndPath\":["
                 + "\"flat.field.detail.foooooooooooo.name=baz\","
                 + "\"flat.field.numbers=1\","
-                + "\"flat.field.numbers=3\","
-                + "\"flat.field.numbers=2\""
+                + "\"flat.field.numbers=2\","
+                + "\"flat.field.numbers=3\""
                 + "]}",
             flattenJsonString("flat", jsonExample)
         );
