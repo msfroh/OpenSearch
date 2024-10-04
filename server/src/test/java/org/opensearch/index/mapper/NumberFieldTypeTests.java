@@ -960,10 +960,7 @@ public class NumberFieldTypeTests extends FieldTypeTestCase {
         BytesArray bitmap = new BytesArray(array);
 
         NumberFieldType ft = new NumberFieldMapper.NumberFieldType("field", NumberType.INTEGER);
-        assertEquals(
-            new IndexOrDocValuesQuery(NumberType.bitmapIndexQuery("field", r), new BitmapDocValuesQuery("field", r)),
-            ft.bitmapQuery(bitmap)
-        );
+        assertEquals(new BitmapDocValuesQuery("field", r), ft.bitmapQuery(bitmap));
 
         ft = new NumberFieldType("field", NumberType.INTEGER, false, false, true, true, null, Collections.emptyMap());
         assertEquals(new BitmapDocValuesQuery("field", r), ft.bitmapQuery(bitmap));

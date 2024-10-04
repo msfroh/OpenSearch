@@ -55,6 +55,7 @@ import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.index.get.GetResult;
 import org.opensearch.indices.TermsLookup;
+import org.opensearch.search.query.BitmapDocValuesQuery;
 import org.opensearch.test.AbstractQueryTestCase;
 import org.hamcrest.CoreMatchers;
 import org.junit.Before;
@@ -447,6 +448,6 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
         QueryShardContext context = createShardContext();
         QueryBuilder rewritten = rewriteQuery(query, new QueryShardContext(context));
         Query luceneQuery = rewritten.toQuery(context);
-        assertTrue(luceneQuery instanceof IndexOrDocValuesQuery);
+        assertTrue(luceneQuery instanceof BitmapDocValuesQuery);
     }
 }

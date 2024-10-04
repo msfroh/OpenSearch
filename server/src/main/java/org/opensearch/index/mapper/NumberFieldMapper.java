@@ -887,12 +887,12 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
                     throw new IllegalArgumentException("Failed to deserialize the bitmap.", e);
                 }
 
-                if (isSearchable && hasDocValues) {
-                    return new IndexOrDocValuesQuery(bitmapIndexQuery(field, bitmap), new BitmapDocValuesQuery(field, bitmap));
-                }
-                if (isSearchable) {
-                    return bitmapIndexQuery(field, bitmap);
-                }
+                // if (isSearchable && hasDocValues) {
+                // return new IndexOrDocValuesQuery(bitmapIndexQuery(field, bitmap), new BitmapDocValuesQuery(field, bitmap));
+                // }
+                // if (isSearchable) {
+                // return bitmapIndexQuery(field, bitmap);
+                // }
                 return new BitmapDocValuesQuery(field, bitmap);
             }
 
