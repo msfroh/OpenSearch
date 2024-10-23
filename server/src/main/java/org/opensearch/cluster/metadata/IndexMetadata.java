@@ -683,6 +683,11 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
 
     private final long[] primaryTerms;
 
+    public CompressedXContent getIngestionSourceDefinition() {
+        return ingestionSourceDefinition;
+    }
+
+    private final CompressedXContent ingestionSourceDefinition;
     private final State state;
 
     private final Map<String, AliasMetadata> aliases;
@@ -724,7 +729,7 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
         final State state,
         final int numberOfShards,
         final int numberOfReplicas,
-        final int numberOfSearchOnlyReplicas,
+        final int numberOfSearchOnlyReplicas, CompressedXContent ingestionSourceDefinition,
         final Settings settings,
         final Map<String, MappingMetadata> mappings,
         final Map<String, AliasMetadata> aliases,
@@ -747,6 +752,7 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
 
         this.index = index;
         this.version = version;
+        this.ingestionSourceDefinition = ingestionSourceDefinition;
         assert mappingVersion >= 0 : mappingVersion;
         this.mappingVersion = mappingVersion;
         assert settingsVersion >= 0 : settingsVersion;
@@ -1747,7 +1753,7 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                 state,
                 numberOfShards,
                 numberOfReplicas,
-                numberOfSearchReplicas,
+                numberOfSearchReplicas, ,
                 tmpSettings,
                 mappings,
                 tmpAliases,
@@ -1765,8 +1771,7 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                 rolloverInfos,
                 isSystem,
                 indexTotalShardsPerNodeLimit,
-                context
-            );
+                context);
         }
 
         public static void toXContent(IndexMetadata indexMetadata, XContentBuilder builder, ToXContent.Params params) throws IOException {

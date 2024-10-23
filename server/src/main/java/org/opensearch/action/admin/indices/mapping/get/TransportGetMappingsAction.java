@@ -44,6 +44,7 @@ import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.indices.IndicesService;
+import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
@@ -85,6 +86,12 @@ public class TransportGetMappingsAction extends TransportClusterInfoAction<GetMa
     @Override
     protected GetMappingsResponse read(StreamInput in) throws IOException {
         return new GetMappingsResponse(in);
+    }
+
+
+    @Override
+    protected void doExecute(Task task, GetMappingsRequest request, ActionListener<GetMappingsResponse> listener) {
+        super.doExecute(task, request, listener);
     }
 
     @Override

@@ -91,6 +91,8 @@ public class CreateIndexRequest extends AcknowledgedRequest<CreateIndexRequest> 
     public static final ParseField SETTINGS = new ParseField("settings");
     public static final ParseField ALIASES = new ParseField("aliases");
     public static final ParseField CONTEXT = new ParseField("context");
+    public static final ParseField INGESTION_SOURCE = new ParseField("ingestion_source");
+
 
     private String cause = "";
 
@@ -533,6 +535,8 @@ public class CreateIndexRequest extends AcknowledgedRequest<CreateIndexRequest> 
                 aliases((Map<String, Object>) entry.getValue());
             } else if (CONTEXT.match(name, deprecationHandler)) {
                 context((Map<String, Object>) entry.getValue());
+            } else if (INGESTION_SOURCE.match(name, deprecationHandler)) {
+
             } else {
                 throw new OpenSearchParseException("unknown key [{}] for create index", name);
             }

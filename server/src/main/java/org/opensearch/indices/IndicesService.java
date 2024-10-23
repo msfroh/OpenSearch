@@ -105,6 +105,7 @@ import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.IngestionSource;
 import org.opensearch.index.analysis.AnalysisRegistry;
 import org.opensearch.index.cache.request.ShardRequestCache;
 import org.opensearch.index.compositeindex.CompositeIndexSettings;
@@ -155,6 +156,7 @@ import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.node.Node;
 import org.opensearch.node.remotestore.RemoteStoreNodeAttribute;
 import org.opensearch.plugins.IndexStorePlugin;
+import org.opensearch.plugins.IngestionSourcePlugin;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
@@ -205,6 +207,7 @@ import static org.opensearch.core.common.util.CollectionUtils.arrayAsArrayList;
 import static org.opensearch.index.IndexService.IndexCreationContext.CREATE_INDEX;
 import static org.opensearch.index.IndexService.IndexCreationContext.METADATA_VERIFICATION;
 import static org.opensearch.index.query.AbstractQueryBuilder.parseInnerQueryBuilder;
+import static org.opensearch.index.query.Rewriteable.rewrite;
 import static org.opensearch.node.remotestore.RemoteStoreNodeAttribute.isRemoteDataAttributePresent;
 import static org.opensearch.search.SearchService.ALLOW_EXPENSIVE_QUERIES;
 
@@ -360,6 +363,7 @@ public class IndicesService extends AbstractLifecycleComponent
     private final FileCache fileCache;
     private final CompositeIndexSettings compositeIndexSettings;
     private final Consumer<IndexShard> replicator;
+    private final Map<String, IngestionSourcePlugin.IngestionSourceFactory<?>> ingestionSourceFactories;
 
     @Override
     protected void doStart() {
@@ -507,6 +511,15 @@ public class IndicesService extends AbstractLifecycleComponent
         this.compositeIndexSettings = compositeIndexSettings;
         this.fileCache = fileCache;
         this.replicator = replicator;
+        this.ingestionSourceFactories = readIngestionSourceFactories(pluginsService.filterPlugins(IngestionSourcePlugin.class));
+    }
+
+    private static Map<String, IngestionSourcePlugin.IngestionSourceFactory<?>> readIngestionSourceFactories(List<IngestionSourcePlugin> ingestionSourcePlugins) {
+        Map<String, IngestionSourcePlugin.IngestionSourceFactory<?>> factories = new HashMap<>();
+        for (IngestionSourcePlugin plugin : ingestionSourcePlugins) {
+            factories.putAll(plugin.getIngestionSourceFactories());
+        }
+        return factories;
     }
 
     public IndicesService(
@@ -998,6 +1011,11 @@ public class IndicesService extends AbstractLifecycleComponent
         if (indexMetadata != null && indexMetadata.getState() == IndexMetadata.State.CLOSE) {
             // NoOpEngine takes precedence as long as the index is closed
             return NoOpEngine::new;
+        }
+
+        if (indexMetadata.getIngestionSourceDefinition() != null) {
+            IngestionSourcePlugin.IngestionSourceFactory<?> ingestionSourceFactory = 
+            return new PullBasedEngineFactory(...);
         }
 
         final List<Optional<EngineFactory>> engineFactories = engineFactoryProviders.stream()
