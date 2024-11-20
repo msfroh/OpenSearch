@@ -919,6 +919,10 @@ public class Node implements Closeable {
             CacheModule cacheModule = new CacheModule(pluginsService.filterPlugins(CachePlugin.class), settings);
             CacheService cacheService = cacheModule.getCacheService();
             final SegmentReplicator segmentReplicator = new SegmentReplicator(threadPool);
+            Map<String, IngestionSourceFactoryProvider> ingestionSourceFactoryProviders = new HashMap<>();
+            pluginsService.filterPlugins(IngestionSourcePlugin.class)
+                .stream()
+                .forEach(p -> ingestionSourceFactoryProviders.putAll(p.getIngestionSourceFactoryProviders()));
             final IndicesService indicesService = new IndicesService(
                 settings,
                 pluginsService,
@@ -949,7 +953,8 @@ public class Node implements Closeable {
                 remoteStoreSettings,
                 fileCache,
                 compositeIndexSettings,
-                segmentReplicator::startReplication
+                segmentReplicator::startReplication,
+                ingestionSourceFactoryProviders
             );
 
             final IngestService ingestService = new IngestService(

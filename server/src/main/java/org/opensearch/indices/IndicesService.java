@@ -343,6 +343,7 @@ public class IndicesService extends AbstractLifecycleComponent
     private final Collection<Function<IndexSettings, Optional<EngineFactory>>> engineFactoryProviders;
     private final Map<String, IndexStorePlugin.DirectoryFactory> directoryFactories;
     private final Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories;
+    private final Map<String, IngestionSourceFactoryProvider> ingestionSourceFactoryProviders;
     final AbstractRefCounted indicesRefCount; // pkg-private for testing
     private final CountDownLatch closeLatch = new CountDownLatch(1);
     private volatile boolean idFieldDataEnabled;
@@ -949,6 +950,9 @@ public class IndicesService extends AbstractLifecycleComponent
             indexCreationContext
         );
 
+        IndexMetadata.IngestionSourceConfig ingestionSource = indexMetadata.getIngestionSource();
+        IngestionSourceFactory ingestionSourceFactory = ingestionSourceFactoryProviderRegistry.get(ingestionSource.type).create(ingestionSource.config);
+
         final IndexModule indexModule = new IndexModule(
             idxSettings,
             analysisRegistry,
@@ -959,7 +963,8 @@ public class IndicesService extends AbstractLifecycleComponent
             indexNameExpressionResolver,
             recoveryStateFactories,
             fileCache,
-            compositeIndexSettings
+            compositeIndexSettings,
+            ingestionSourceFactory
         );
         for (IndexingOperationListener operationListener : indexingOperationListeners) {
             indexModule.addIndexOperationListener(operationListener);

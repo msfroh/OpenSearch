@@ -741,7 +741,8 @@ public final class IndexModule {
                 remoteStoreSettings,
                 fileCache,
                 compositeIndexSettings,
-                replicator
+                replicator,
+                ingestionSourceFactory
             );
             success = true;
             return indexService;

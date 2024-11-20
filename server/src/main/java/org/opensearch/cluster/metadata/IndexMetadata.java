@@ -52,6 +52,7 @@ import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.xcontent.XContentHelper;
+import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.Assertions;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.common.io.stream.BufferedChecksumStreamOutput;
@@ -661,6 +662,7 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
     public static final String REMOTE_STORE_CUSTOM_KEY = "remote_store";
     public static final String TRANSLOG_METADATA_KEY = "translog_metadata";
     public static final String CONTEXT_KEY = "context";
+    public static final String KEY_INGESTION_SOURCE = "ingestion_source";
 
     public static final String INDEX_STATE_FILE_PREFIX = "state-";
 
@@ -1352,6 +1354,38 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
         return new Builder(indexMetadata);
     }
 
+    public static class IngestionSource {
+        public String type;
+        public Map<String, Object> config;
+
+        public static IngestionSource fromXContent(XContentParser parser) throws IOException {
+            if (parser.currentToken() == XContentParser.Token.START_OBJECT) {  // on a start object move to next token
+                parser.nextToken();
+            }
+            String currentField = null;
+            String type;
+            JsonXContent config = null;
+            while (parser.nextToken() != XContentParser.Token.END_OBJECT) {
+                if (parser.nextToken() == XContentParser.Token.FIELD_NAME) {
+                    currentField = parser.currentName();
+                } else if ("type".equals(currentField)) {
+                    type = parser.text();
+                } else if ("config".equals(currentField)) {
+                    XContentBuilder.builder(JsonXContent.jsonXContent)
+                    config = parser.map();
+                }
+            }
+            config = Map.of(
+                "topic", "test",
+                "bootstrapServer", "localhost:9092",
+                "Props", Map.of(
+                    "auto.commit", false
+                )
+            );
+        }
+    }
+
+
     /**
      * Builder of index metadata.
      *
@@ -1472,6 +1506,10 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
         public Builder settings(Settings settings) {
             this.settings = settings;
             return this;
+        }
+
+        public Builder ingestionSource(IngestionSource source) {
+            //
         }
 
         public MappingMetadata mapping() {
@@ -1956,6 +1994,8 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
                         parser.skipChildren();
                     } else if (CONTEXT_KEY.equals(currentFieldName)) {
                         builder.context(Context.fromXContent(parser));
+                    } else if (KEY_INGESTION_SOURCE.equals(currentFieldName)) {
+                        builder.ingestionSourceConfig(IngestionSource.fromXcontent(parser));
                     } else {
                         // assume it's custom index metadata
                         builder.putCustom(currentFieldName, parser.mapStrings());

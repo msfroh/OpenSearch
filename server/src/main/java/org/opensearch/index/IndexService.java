@@ -662,6 +662,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 path
             );
             eventListener.onStoreCreated(shardId);
+
+            IngestionSource ingestionSource = ingestionSourceFactory.create(shardId);
             indexShard = new IndexShard(
                 routing,
                 this.indexSettings,
@@ -691,7 +693,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 recoverySettings,
                 remoteStoreSettings,
                 seedRemote,
-                discoveryNodes
+                discoveryNodes,
+                ingestionSource
             );
             eventListener.indexShardStateChanged(indexShard, null, indexShard.state(), "shard created");
             eventListener.afterIndexShardCreated(indexShard);
