@@ -35,7 +35,6 @@ package org.opensearch.indices;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.automaton.Automata;
-import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.CharacterRunAutomaton;
 import org.apache.lucene.util.automaton.Operations;
 import org.opensearch.common.Nullable;
@@ -45,7 +44,6 @@ import org.opensearch.core.index.Index;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -93,12 +91,12 @@ public class SystemIndices {
         final List<SystemIndexDescriptor> matchingDescriptors = SystemIndexRegistry.getAllDescriptors()
             .stream()
             .filter(descriptor -> descriptor.matchesIndexPattern(name))
-            .collect(Collectors.toList());
+            .toList();
 
         if (matchingDescriptors.isEmpty()) {
             return null;
         } else if (matchingDescriptors.size() == 1) {
-            return matchingDescriptors.get(0);
+            return matchingDescriptors.getFirst();
         } else {
             // This should be prevented by failing on overlapping patterns at startup time, but is here just in case.
             StringBuilder errorMessage = new StringBuilder().append("index name [")
@@ -143,11 +141,12 @@ public class SystemIndices {
     }
 
     private static CharacterRunAutomaton buildCharacterRunAutomaton(Collection<SystemIndexDescriptor> descriptors) {
-        Optional<Automaton> automaton = descriptors.stream()
-            .map(descriptor -> Regex.simpleMatchToAutomaton(descriptor.getIndexPattern()))
-            .reduce(Operations::union);
+        if (descriptors.isEmpty()) {
+            return new CharacterRunAutomaton(Automata.makeEmpty());
+        }
+        String[] patterns = descriptors.stream().map(SystemIndexDescriptor::getIndexPattern).toArray(String[]::new);
         return new CharacterRunAutomaton(
-            Operations.determinize(automaton.orElse(Automata.makeEmpty()), Operations.DEFAULT_DETERMINIZE_WORK_LIMIT)
+            Operations.determinize(Regex.simpleMatchToAutomaton(patterns), Operations.DEFAULT_DETERMINIZE_WORK_LIMIT)
         );
     }
 }
