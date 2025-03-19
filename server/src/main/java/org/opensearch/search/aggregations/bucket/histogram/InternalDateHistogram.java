@@ -34,6 +34,7 @@ package org.opensearch.search.aggregations.bucket.histogram;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.PriorityQueue;
 import org.opensearch.common.Rounding;
+import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.xcontent.XContentBuilder;
@@ -394,9 +395,31 @@ public final class InternalDateHistogram extends InternalMultiBucketAggregation<
         return createBucket(buckets.get(0).key, docCount, aggs);
     }
 
+    private int getTotalBucketCount() {
+        LongBounds bounds = emptyBucketInfo.bounds;
+        int bucketCount = 0;
+        if (bounds.getMin() != null && bounds.getMax() != null) {
+            long key = bounds.getMin() + offset;
+            long max = bounds.getMax() + offset;
+            while (key < max) {
+                bucketCount++;
+                key = nextKey(key).longValue();
+            }
+        }
+        return bucketCount;
+    }
+
     private void addEmptyBuckets(List<Bucket> list, ReduceContext reduceContext) {
         Bucket lastBucket = null;
         LongBounds bounds = emptyBucketInfo.bounds;
+
+        int emptyBucketCount = getTotalBucketCount() - list.size();
+        CircuitBreaker breaker = reduceContext.getBreaker();
+        if (breaker != null) {
+            breaker.addEstimateBytesAndMaybeBreak(50L * emptyBucketCount, "empty date histogram buckets");
+        }
+        reduceContext.consumeBucketsAndMaybeBreak(emptyBucketCount);
+
         ListIterator<Bucket> iter = list.listIterator();
 
         // first adding all the empty buckets *before* the actual data (based on th extended_bounds.min the user requested)
