@@ -47,6 +47,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * A {@link FilterMergePolicy} that interleaves eldest and newest segments picked by {@link MergePolicy#findForcedMerges}
@@ -55,9 +56,11 @@ import java.util.Map;
  */
 public class ShuffleForcedMergePolicy extends FilterMergePolicy {
     private static final String SHUFFLE_MERGE_KEY = "opensearch.shuffle_merge";
+    private final Supplier<Comparator<SegmentCommitInfo>> segmentSorter;
 
-    public ShuffleForcedMergePolicy(MergePolicy in) {
+    public ShuffleForcedMergePolicy(MergePolicy in, Supplier<Comparator<SegmentCommitInfo>> segmentSorter) {
         super(in);
+        this.segmentSorter = segmentSorter;
     }
 
     /**
@@ -66,11 +69,6 @@ public class ShuffleForcedMergePolicy extends FilterMergePolicy {
     public static boolean isInterleavedSegment(LeafReader reader) {
         SegmentReader segReader = Lucene.segmentReader(reader);
         return segReader.getSegmentInfo().info.getDiagnostics().containsKey(SHUFFLE_MERGE_KEY);
-    }
-
-    @Override
-    public MergeSpecification findForcedDeletesMerges(SegmentInfos segmentInfos, MergeContext mergeContext) throws IOException {
-        return wrap(in.findForcedDeletesMerges(segmentInfos, mergeContext));
     }
 
     @Override
@@ -112,7 +110,11 @@ public class ShuffleForcedMergePolicy extends FilterMergePolicy {
     // and then interleave them to colocate oldest and most recent segments together.
     private List<SegmentCommitInfo> interleaveList(List<SegmentCommitInfo> infos) throws IOException {
         List<SegmentCommitInfo> newInfos = new ArrayList<>(infos.size());
-        Collections.sort(infos, Comparator.comparing(a -> a.info.name));
+        if (segmentSorter != null) {
+            Collections.sort(infos, segmentSorter.get());
+        } else {
+            Collections.sort(infos, Comparator.comparing(a -> a.info.name));
+        }
         int left = 0;
         int right = infos.size() - 1;
         while (left <= right) {

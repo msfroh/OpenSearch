@@ -41,11 +41,14 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.LiveIndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.SoftDeletesRetentionMergePolicy;
 import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.index.StoredFields;
@@ -118,6 +121,7 @@ import org.opensearch.threadpool.ThreadPool;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -133,6 +137,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -2353,7 +2358,12 @@ public class InternalEngine extends Engine {
             // We wrap the merge policy for all indices even though it is mostly useful for time-based indices
             // but there should be no overhead for other type of indices so it's simpler than adding a setting
             // to enable it.
-            mergePolicy = new ShuffleForcedMergePolicy(mergePolicy);
+            if (config().getLeafSorter() != null) {
+                mergePolicy = new ShuffleForcedMergePolicy(mergePolicy, adaptLeafSorter());
+            } else {
+                mergePolicy = new ShuffleForcedMergePolicy(mergePolicy, null);
+
+            }
         }
 
         if (config().getIndexSettings().isMergeOnFlushEnabled()) {
@@ -2383,6 +2393,21 @@ public class InternalEngine extends Engine {
             iwc.setLeafSorter(config().getLeafSorter()); // The default segment search order
         }
         return iwc;
+    }
+
+    private Supplier<Comparator<SegmentCommitInfo>> adaptLeafSorter() {
+        return () -> {
+            Map<SegmentInfo, Integer> segmentInfoOrder = new HashMap<>();
+            try (Searcher searcher = acquireSearcher("leaf_sorter")) {
+                int numLeaves = searcher.getDirectoryReader().leaves().size();
+                for (int i = 0; i < numLeaves; i++) {
+                    LeafReader leafReader = searcher.getDirectoryReader().leaves().get(i).reader();
+                    SegmentReader segmentReader = Lucene.segmentReader(leafReader);
+                    segmentInfoOrder.put(segmentReader.getSegmentInfo().info, i);
+                }
+            }
+            return Comparator.comparingInt((SegmentCommitInfo a) -> segmentInfoOrder.getOrDefault(a, Integer.MAX_VALUE));
+        };
     }
 
     /**
