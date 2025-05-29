@@ -6,7 +6,11 @@ Within this branch, I'm updating the README to explain how to get started with e
 
 See instructions at https://etcd.io/docs/v3.5/install/.
 
-On my Mac, this meant `brew install etcd`. Then I just ran the `etcd` executable and left it running in a terminal tab.
+On my Mac, this meant `brew install etcd`. Then I just ran the `etcd` executable and left it running in a terminal tab. 
+
+
+
+On Ubuntu, I needed to run `sudo apt install etcd-server etcd-client` to get both the `etcd` and `etcdctl` commands. Installing the server automatically started the `etcd` process.
 
 You should also get the `etcdctl` command line tool included. You can interact with the running local etcd instance as follows:
 
@@ -27,6 +31,7 @@ bar
 
 # Delete the entry for key 'foo'
 % etcdctl del foo
+1
 ```
 
 ### Run OpenSearch from this branch
@@ -65,7 +70,6 @@ bar
 
 # Search the document
 % curl 'http://localhost:9200/myindex/_search?pretty'
-
 ```
 
 <img src="https://opensearch.org/assets/img/opensearch-logo-themed.svg" height="64px">
@@ -116,6 +120,7 @@ bar
 The project's [Code of Conduct](CODE_OF_CONDUCT.md) outlines our expectations for all participants in our community, based on the [OpenSearch Code of Conduct](https://opensearch.org/code-of-conduct/). Please contact [conduct@opensearch.foundation](mailto:conduct@opensearch.foundation) with any additional questions or comments.
 
 ## Security
+
 If you discover a potential security issue in this project we ask that you notify OpenSearch Security directly via email to security@opensearch.org. Please do **not** create a public GitHub issue.
 
 ## License
@@ -131,4 +136,3 @@ Copyright OpenSearch Contributors. See [NOTICE](NOTICE.txt) for details.
 OpenSearch is a registered trademark of Amazon Web Services.
 
 OpenSearch includes certain Apache-licensed Elasticsearch code from Elasticsearch B.V. and other source code. Elasticsearch B.V. is not the source of that other source code. ELASTICSEARCH is a registered trademark of Elasticsearch B.V.
-
