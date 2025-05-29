@@ -1,3 +1,73 @@
+## Running OpenSearch with etcd cluster state
+
+Within this branch, I'm updating the README to explain how to get started with etcd.
+
+### Install and launch etcd
+
+See instructions at https://etcd.io/docs/v3.5/install/.
+
+On my Mac, this meant `brew install etcd`. Then I just ran the `etcd` executable and left it running in a terminal tab.
+
+You should also get the `etcdctl` command line tool included. You can interact with the running local etcd instance as follows:
+
+```bash
+# Write value 'bar' to key 'foo'
+% etcdctl put foo bar
+OK
+
+# Read the value from key 'foo'
+% etcdctl get foo
+foo
+bar
+
+# Get all keys whose first byte is between ' ' (the earliest printable character) and '~' (the last)
+%  etcdctl get ' ' '~'
+foo
+bar
+
+# Delete the entry for key 'foo'
+% etcdctl del foo
+```
+
+### Run OpenSearch from this branch
+
+```bash
+# Clone the repo
+% git clone https://github.com/msfroh/OpenSearch.git
+
+# Enter the cloned repo
+% cd OpenSearch
+
+# Checkout the correct branch
+% git checkout clusterless_datanode
+
+# Run with the cluster-etcd plugin loaded
+% ./gradlew run -PinstalledPlugins="['cluster-etcd']"
+
+# In another tab, check the local cluster state
+% curl 'http://localhost:9200/_cluster/state?local&pretty'
+```
+
+### Push some state to etcd
+
+```bash
+# Write some index metadata for an index. For now, this is the smallest valid metadata I've been able to create.
+% etcdctl put myindex '{"myindex":{"version":1,"mapping_version":1,"settings_version":1,"aliases_version":1,"state":"open","settings":{"index":{"number_of_shards":"1","number_of_replicas":"0","uuid":"E8F2-ebqQ1-U4SL6NoPEyw","version":{"created":"137227827"}}},"mappings":{"_doc":{"properties":{"title":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}}}}},"primary_terms":[1]}}'
+
+# Assign primary for shard 0 of myindex to localhost
+% etcdctl put '127.0.0.1' '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
+
+# Check the local cluster state
+% curl 'http://localhost:9200/_cluster/state?local&pretty'
+
+# Write a document
+% curl -X POST -H 'Content-Type: application/json' http://localhost:9200/myindex/_doc/1 -d '{"title":"Hello"}'
+
+# Search the document
+% curl 'http://localhost:9200/myindex/_search?pretty'
+
+```
+
 <img src="https://opensearch.org/assets/img/opensearch-logo-themed.svg" height="64px">
 
 [![Chat](https://img.shields.io/badge/chat-on%20forums-blue)](https://forum.opensearch.org/c/opensearch/)
