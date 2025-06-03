@@ -34,7 +34,7 @@ bar
 1
 ```
 
-### Run OpenSearch from this branch
+### Run two OpenSearch nodes from this branch
 
 ```bash
 # Clone the repo
@@ -46,21 +46,61 @@ bar
 # Checkout the correct branch
 % git checkout clusterless_datanode
 
-# Run with the cluster-etcd plugin loaded
-% ./gradlew run -PinstalledPlugins="['cluster-etcd']"
+# Run with the cluster-etcd plugin loaded and launch two nodes
+% ./gradlew run -PinstalledPlugins="['cluster-etcd']" -PnumNodes=2
 
-# In another tab, check the local cluster state
+# In another tab, check the local cluster state for each node
+# In the examples below, this will be the data node
 % curl 'http://localhost:9200/_cluster/state?local&pretty'
+
+# In the examples below, this will be the coordinator node
+% curl 'http://localhost:9201/_cluster/state?local&pretty'
 ```
 
-### Push some state to etcd
+### Push some state to etcd to start a data node
 
 ```bash
 # Write some index metadata for an index. For now, this is the smallest valid metadata I've been able to create.
-% etcdctl put myindex '{"myindex":{"version":1,"mapping_version":1,"settings_version":1,"aliases_version":1,"state":"open","settings":{"index":{"number_of_shards":"1","number_of_replicas":"0","uuid":"E8F2-ebqQ1-U4SL6NoPEyw","version":{"created":"137227827"}}},"mappings":{"_doc":{"properties":{"title":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}}}}},"primary_terms":[1]}}'
+% cat << EOF | etcdctl put myindex 
+{
+  "myindex": {
+    "version":1,
+    "mapping_version":1,
+    "settings_version":1,
+    "aliases_version":1,
+    "state":"open",
+    "settings":{
+      "index":{
+        "number_of_shards":"1",
+        "number_of_replicas":"0",
+        "uuid":"E8F2-ebqQ1-U4SL6NoPEyw",
+        "version": {
+          "created":"137227827"
+        }
+      }
+    },
+    "mappings":{
+      "_doc":{
+        "properties":{
+          "title":{
+            "type":"text",
+            "fields":{
+              "keyword":{
+                "type":"keyword",
+                "ignore_above":256
+              }
+            }
+          }
+        }
+      }
+    },
+    "primary_terms":[1]
+  }
+}
+EOF
 
-# Assign primary for shard 0 of myindex to localhost
-% etcdctl put '127.0.0.1' '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
+# Assign primary for shard 0 of myindex to the node listening on port 9200/9300
+% etcdctl put '127.0.0.1:9300' '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
 
 # Check the local cluster state
 % curl 'http://localhost:9200/_cluster/state?local&pretty'
@@ -70,6 +110,42 @@ bar
 
 # Search the document
 % curl 'http://localhost:9200/myindex/_search?pretty'
+```
+
+### Add a coordinator
+
+In order for the coordinator node to complete a successful handshake with the data node, they must agree on the
+data node's persistent id and ephemeral_id, which are both generated on startup.
+
+```bash
+# Get the node ID and ephemeral ID from the data node. (These were generated on startup.)
+% DATA_NODE_ID=$(curl 'http://localhost:9200/_cluster/state?local' | jq -r '.nodes | keys[0]' )
+
+% DATA_NODE_EPHEMERAL_ID=$(curl 'http://localhost:9200/_cluster/state?local' | jq -r ".nodes.[\"${DATA_NODE_ID}\"].ephemeral_id")
+
+# Tell the coordinator that shard 0 of myindex is found on the data node
+% cat << EOF | etcdctl put 127.0.0.1:9301
+{
+  "remote_shards": {
+    "myindex": {
+      "uuid" : "E8F2-ebqQ1-U4SL6NoPEyw",
+      "shard_routing" : [
+        [
+          {
+            "node_id": "${DATA_NODE_ID}",       
+            "ephemeral_id": "${DATA_NODE_EPHEMERAL_ID}",
+            "address": "127.0.0.1",
+            "port": 9300
+          }
+        ]
+      ]
+    }
+  }
+}
+EOF 
+
+# Search via the coordinator node
+% curl 'http://localhost:9201/myindex/_search?pretty'
 ```
 
 <img src="https://opensearch.org/assets/img/opensearch-logo-themed.svg" height="64px">
