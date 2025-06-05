@@ -52,13 +52,13 @@ locally. The first will serve as a coordinator, while the other two will be data
 
 # In another tab, check the local cluster state for each node
 
-# In the examples below, this will be the coordinator node
+# In the examples below, this will be the coordinator node. Note that the node name is runTask-0.
 % curl 'http://localhost:9200/_cluster/state?local&pretty'
 
-# In the examples below, this will be the first data node
+# In the examples below, this will be the first data node. Note that the node name is runTask-1.
 % curl 'http://localhost:9201/_cluster/state?local&pretty'
 
-# In the examples below, this will be the second data node
+# In the examples below, this will be the second data node. Note that the node name is runTask-2.
 % curl 'http://localhost:9202/_cluster/state?local&pretty'
 ```
 
@@ -105,10 +105,10 @@ locally. The first will serve as a coordinator, while the other two will be data
 EOF
 
 # Assign primary for shard 0 of myindex to the node listening on port 9201/9301
-% etcdctl put '127.0.0.1:9301' '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
+% etcdctl put runTask-1 '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
 
 # Assign primary for shard 1 of myindex to the node listening on port 9202/9302
-% etcdctl put '127.0.0.1:9302' '{"local_shards":{"myindex":{"1":"PRIMARY"}}}'
+% etcdctl put runTask-2 '{"local_shards":{"myindex":{"1":"PRIMARY"}}}'
 
 # Check the local cluster state on each data node
 % curl 'http://localhost:9201/_cluster/state?local&pretty'
@@ -143,7 +143,7 @@ data nodes' persistent id and ephemeral_id, which are both generated on startup.
 
 # Tell the coordinator about the data nodes and that shard 0 is on the first data node and shard 1 is on the second.
 # Note that the coordinator will not fetch the index metadata, which is why we must specify the index UUID.
-% cat << EOF | etcdctl put 127.0.0.1:9300
+% cat << EOF | etcdctl put runTask-0
 {
   "remote_shards": {
     "remote_nodes": [
