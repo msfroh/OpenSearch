@@ -8,8 +8,6 @@ See instructions at https://etcd.io/docs/v3.5/install/.
 
 On my Mac, this meant `brew install etcd`. Then I just ran the `etcd` executable and left it running in a terminal tab. 
 
-
-
 On Ubuntu, I needed to run `sudo apt install etcd-server etcd-client` to get both the `etcd` and `etcdctl` commands. Installing the server automatically started the `etcd` process.
 
 You should also get the `etcdctl` command line tool included. You can interact with the running local etcd instance as follows:
@@ -34,7 +32,10 @@ bar
 1
 ```
 
-### Run two OpenSearch nodes from this branch
+### Run three OpenSearch nodes from this branch
+
+In order to validate that we can form a working distributed system without a cluster, we will start three OpenSearch nodes
+locally. The first will serve as a coordinator, while the other two will be data nodes
 
 ```bash
 # Clone the repo
@@ -46,18 +47,22 @@ bar
 # Checkout the correct branch
 % git checkout clusterless_datanode
 
-# Run with the cluster-etcd plugin loaded and launch two nodes
-% ./gradlew run -PinstalledPlugins="['cluster-etcd']" -PnumNodes=2
+# Run with the cluster-etcd plugin loaded and launch three nodes
+% ./gradlew run -PinstalledPlugins="['cluster-etcd']" -PnumNodes=23
 
 # In another tab, check the local cluster state for each node
-# In the examples below, this will be the data node
-% curl 'http://localhost:9200/_cluster/state?local&pretty'
 
 # In the examples below, this will be the coordinator node
+% curl 'http://localhost:9200/_cluster/state?local&pretty'
+
+# In the examples below, this will be the first data node
 % curl 'http://localhost:9201/_cluster/state?local&pretty'
+
+# In the examples below, this will be the second data node
+% curl 'http://localhost:9202/_cluster/state?local&pretty'
 ```
 
-### Push some state to etcd to start a data node
+### Push some state to etcd to start the data nodes
 
 ```bash
 # Write some index metadata for an index. For now, this is the smallest valid metadata I've been able to create.
@@ -94,58 +99,111 @@ bar
         }
       }
     },
-    "primary_terms":[1]
+    "primary_terms":[1,1]
   }
 }
 EOF
 
-# Assign primary for shard 0 of myindex to the node listening on port 9200/9300
-% etcdctl put '127.0.0.1:9300' '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
+# Assign primary for shard 0 of myindex to the node listening on port 9201/9301
+% etcdctl put '127.0.0.1:9301' '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
 
-# Check the local cluster state
-% curl 'http://localhost:9200/_cluster/state?local&pretty'
+# Assign primary for shard 1 of myindex to the node listening on port 9202/9302
+% etcdctl put '127.0.0.1:9302' '{"local_shards":{"myindex":{"1":"PRIMARY"}}}'
 
-# Write a document
-% curl -X POST -H 'Content-Type: application/json' http://localhost:9200/myindex/_doc/1 -d '{"title":"Hello"}'
+# Check the local cluster state on each data node
+% curl 'http://localhost:9201/_cluster/state?local&pretty'
+% curl 'http://localhost:9202/_cluster/state?local&pretty'
 
-# Search the document
-% curl 'http://localhost:9200/myindex/_search?pretty'
+# Write a document to each shard. Here we're relying on knowing which shard each doc will land on (from trial and error).
+# Note that if you try sending each document to the other data node, it will fail, since the data nodes don't know about
+# each other and don't know where to forward the documents.
+% curl -X POST -H 'Content-Type: application/json' http://localhost:9201/myindex/_doc/3 -d '{"title":"Hello from shard 0"}'
+% curl -X POST -H 'Content-Type: application/json' http://localhost:9202/myindex/_doc/1 -d '{"title":"Hello from shard 1"}'
+
+# Search the document on shard 0
+% curl 'http://localhost:9201/myindex/_search?pretty'
+
+# Search the document on shard 1
+% curl 'http://localhost:9202/myindex/_search?pretty'
 ```
 
 ### Add a coordinator
 
-In order for the coordinator node to complete a successful handshake with the data node, they must agree on the
-data node's persistent id and ephemeral_id, which are both generated on startup.
+In order for the coordinator node to complete a successful handshake with the data nodes, they must agree on the
+data nodes' persistent id and ephemeral_id, which are both generated on startup.
 
 ```bash
-# Get the node ID and ephemeral ID from the data node. (These were generated on startup.)
-% DATA_NODE_ID=$(curl 'http://localhost:9200/_cluster/state?local' | jq -r '.nodes | keys[0]' )
+# Get the node ID and ephemeral ID from the first data node.
+% DATA_NODE1_ID=$(curl 'http://localhost:9201/_cluster/state?local' | jq -r '.nodes | keys[0]' )
+% DATA_NODE1_EPHEMERAL_ID=$(curl 'http://localhost:9201/_cluster/state?local' | jq -r ".nodes.[\"${DATA_NODE1_ID}\"].ephemeral_id")
 
-% DATA_NODE_EPHEMERAL_ID=$(curl 'http://localhost:9200/_cluster/state?local' | jq -r ".nodes.[\"${DATA_NODE_ID}\"].ephemeral_id")
+# Get the node ID and ephemeral ID from the second data node.
+% DATA_NODE2_ID=$(curl 'http://localhost:9202/_cluster/state?local' | jq -r '.nodes | keys[0]' )
+% DATA_NODE2_EPHEMERAL_ID=$(curl 'http://localhost:9202/_cluster/state?local' | jq -r ".nodes.[\"${DATA_NODE2_ID}\"].ephemeral_id")
 
-# Tell the coordinator that shard 0 of myindex is found on the data node
-% cat << EOF | etcdctl put 127.0.0.1:9301
+# Tell the coordinator about the data nodes and that shard 0 is on the first data node and shard 1 is on the second.
+# Note that the coordinator will not fetch the index metadata, which is why we must specify the index UUID.
+% cat << EOF | etcdctl put 127.0.0.1:9300
 {
   "remote_shards": {
-    "myindex": {
-      "uuid" : "E8F2-ebqQ1-U4SL6NoPEyw",
-      "shard_routing" : [
-        [
-          {
-            "node_id": "${DATA_NODE_ID}",       
-            "ephemeral_id": "${DATA_NODE_EPHEMERAL_ID}",
-            "address": "127.0.0.1",
-            "port": 9300
-          }
+    "remote_nodes": [
+      {
+        "node_id": "${DATA_NODE1_ID}",       
+        "ephemeral_id": "${DATA_NODE1_EPHEMERAL_ID}",
+        "address": "127.0.0.1",
+        "port": 9301
+      },
+      {
+        "node_id": "${DATA_NODE2_ID}",       
+        "ephemeral_id": "${DATA_NODE2_EPHEMERAL_ID}",
+        "address": "127.0.0.1",
+        "port": 9302
+      }
+    ],
+    "indices": {
+      "myindex": {
+        "uuid" : "E8F2-ebqQ1-U4SL6NoPEyw",
+        "shard_routing" : [
+          [
+            {"node_id": "${DATA_NODE1_ID}", "primary": true }
+          ],
+          [
+            {"node_id": "${DATA_NODE2_ID}", "primary" : true }
+          ]
         ]
-      ]
+      }
     }
   }
 }
 EOF 
 
-# Search via the coordinator node
-% curl 'http://localhost:9201/myindex/_search?pretty'
+# Search via the coordinator node. You'll see both documents added above
+% curl 'http://localhost:9200/myindex/_search?pretty'
+
+
+# Index a batch of documents (surely hitting both shards) via the coordinator node
+% curl -X POST -H 'Content-Type: application/json' http://localhost:9200/myindex/_bulk -d '
+{ "index": {"_id":"2"}}
+{"title": "Document 2"}
+{ "index": {"_id":"4"}}
+{"title": "Document 4"}
+{ "index": {"_id":"5"}}
+{"title": "Document 5"}
+{ "index": {"_id":"6"}}
+{"title": "Document 6"}
+{ "index": {"_id":"7"}}
+{"title": "Document 7"}
+{ "index": {"_id":"8"}}
+{"title": "Document 8"}
+{ "index": {"_id":"9"}}
+{"title": "Document 9"}
+{ "index": {"_id":"10"}}
+{"title": "Document 10"}
+'
+
+# Search via the coordinator node. You'll see 10 documents. If you search each data node you'll see around half.
+% curl 'http://localhost:9200/myindex/_search?pretty'
+
 ```
 
 <img src="https://opensearch.org/assets/img/opensearch-logo-themed.svg" height="64px">
