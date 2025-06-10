@@ -47,8 +47,8 @@ locally. The first will serve as a coordinator, while the other two will be data
 # Checkout the correct branch
 % git checkout clusterless_datanode
 
-# Run with the cluster-etcd plugin loaded and launch three nodes
-% ./gradlew run -PinstalledPlugins="['cluster-etcd']" -PnumNodes=23
+# Run with the cluster-etcd plugin loaded and launch three nodes. We also need to set the clusterless mode feature flag.
+% ./gradlew run -PinstalledPlugins="['cluster-etcd']" -PnumNodes=3 -Dtests.opensearch.opensearch.experimental.feature.clusterless.enabled=true
 
 # In another tab, check the local cluster state for each node
 
