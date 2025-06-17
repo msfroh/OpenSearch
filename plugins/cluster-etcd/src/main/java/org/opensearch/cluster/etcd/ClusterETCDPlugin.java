@@ -38,11 +38,12 @@ public class ClusterETCDPlugin extends Plugin implements ClusterPlugin {
     private ETCDWatcher etcdWatcher;
     private ETCDHeartbeat etcdHeartbeat;
     private Client etcdClient;
-
+    private NodeEnvironment nodeEnvironment;
 
     @Override
     public Collection<Object> createComponents(org.opensearch.transport.client.Client client, ClusterService clusterService, ThreadPool threadPool, ResourceWatcherService resourceWatcherService, ScriptService scriptService, NamedXContentRegistry xContentRegistry, Environment environment, NodeEnvironment nodeEnvironment, NamedWriteableRegistry namedWriteableRegistry, IndexNameExpressionResolver indexNameExpressionResolver, Supplier<RepositoriesService> repositoriesServiceSupplier) {
         this.clusterService = clusterService;
+        this.nodeEnvironment = nodeEnvironment;
         return Collections.emptySet();
     }
 
@@ -54,7 +55,7 @@ public class ClusterETCDPlugin extends Plugin implements ClusterPlugin {
             etcdClient = Client.builder().endpoints("http://127.0.0.1:2379").build();
             etcdWatcher = new ETCDWatcher(localNode, getNodeKey(localNode),
                 new ChangeApplierService(clusterService.getClusterApplierService()), etcdClient);
-            etcdHeartbeat = new ETCDHeartbeat(clusterService.getNodeName(), clusterService.localNode().getId(), clusterService.localNode().getEphemeralId(), etcdClient);
+            etcdHeartbeat = new ETCDHeartbeat(clusterService.getNodeName(), clusterService.localNode().getId(), clusterService.localNode().getEphemeralId(), etcdClient, nodeEnvironment);
             etcdHeartbeat.start();
         } catch (IOException | ExecutionException | InterruptedException e) {
             throw new RuntimeException(e);
