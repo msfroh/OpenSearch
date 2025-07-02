@@ -69,23 +69,22 @@ public class ETCDHeartbeat {
         ByteSizeValue memoryMax = osStats.getMem().getTotal();
         ByteSizeValue memoryUsed = osStats.getMem().getUsed();
 
-        // Get disk info
+       // Disk
         FsProbe fsProbe = new FsProbe(nodeEnvironment, null);
         long diskTotalMB = 0;
         long diskAvailableMB = 0;
         try {
             FsInfo fsInfo = fsProbe.stats(null);
-            FsInfo.Path fsPath = fsInfo.iterator().next(); // first mount point
-
-            diskTotalMB = fsPath.getTotal().getMb();
-            diskAvailableMB = fsPath.getAvailable().getMb();
+            for (FsInfo.Path path : fsInfo) {
+                diskTotalMB += path.getTotal().getMb();
+                diskAvailableMB += path.getAvailable().getMb();
+            }
         } catch (IOException e) {
             logger.error("Failed to get fs info", e);
         }
 
         // Get heap info
-        JvmService jvmService = new JvmService(Settings.EMPTY);
-        JvmStats jvmStats = jvmService.stats();
+        JvmStats jvmStats = JvmStats.jvmStats();
         int heapUsedPercent = jvmStats.getMem().getHeapUsedPercent();  
         ByteSizeValue heapMax = jvmStats.getMem().getHeapMax();
         ByteSizeValue heapUsed = jvmStats.getMem().getHeapUsed();
