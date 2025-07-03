@@ -28,7 +28,7 @@ public class ETCDHeartbeat {
     private final String ephemeralId;
     private final Client etcdClient;
     private final ScheduledExecutorService scheduler;
-    private final ByteSequence nodeKey;
+    private final ByteSequence nodeStateKey;
     private final NodeEnvironment nodeEnvironment;
 
     public ETCDHeartbeat(String nodeName, String nodeId, String ephemeralId, Client etcdClient, NodeEnvironment nodeEnvironment) {
@@ -37,7 +37,7 @@ public class ETCDHeartbeat {
         this.ephemeralId = ephemeralId;
         this.etcdClient = etcdClient;
         this.scheduler = Executors.newSingleThreadScheduledExecutor();
-        this.nodeKey = ByteSequence.from("heartbeat/" + nodeName, StandardCharsets.UTF_8);
+        this.nodeStateKey = ByteSequence.from("actual-state/node-state/" + nodeName, StandardCharsets.UTF_8);
         this.nodeEnvironment = nodeEnvironment;
     }
 
@@ -95,7 +95,7 @@ public class ETCDHeartbeat {
             String heartbeatValue = String.format("{\"timestamp\":%d,\"nodeName\":\"%s\",\"nodeId\":\"%s\",\"ephemeralId\":\"%s\", \"heartbeatIntervalSeconds\":%d,\"cpuUsedPercent\":%d,\"memoryUsedPercent\":%d,\"memoryMaxMB\":%d,\"memoryUsedMB\":%d,\"heapMaxMB\":%d,\"heapUsedMB\":%d,\"heapUsedPercent\":%d,\"diskTotalMB\":%d,\"diskAvailableMB\":%d}",
                 System.currentTimeMillis(), nodeName, nodeId, ephemeralId, HEARTBEAT_INTERVAL_SECONDS, cpuPercent, memoryPercent, memoryMax.getMb(), memoryUsed.getMb(), heapMax.getMb(), heapUsed.getMb(), heapUsedPercent, diskTotalMB, diskAvailableMB);
             ByteSequence value = ByteSequence.from(heartbeatValue, StandardCharsets.UTF_8);
-            kvClient.put(nodeKey, value).get();
+            kvClient.put(nodeStateKey, value).get();
         } catch (InterruptedException | ExecutionException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Failed to publish heartbeat", e);
