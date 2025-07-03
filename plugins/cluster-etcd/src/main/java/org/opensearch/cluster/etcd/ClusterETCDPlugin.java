@@ -55,7 +55,7 @@ public class ClusterETCDPlugin extends Plugin implements ClusterPlugin {
             etcdClient = Client.builder().endpoints("http://127.0.0.1:2379").build();
             etcdWatcher = new ETCDWatcher(localNode, getNodeKey(localNode),
                 new ChangeApplierService(clusterService.getClusterApplierService()), etcdClient);
-            etcdHeartbeat = new ETCDHeartbeat(clusterService.getNodeName(), clusterService.localNode().getId(), clusterService.localNode().getEphemeralId(), etcdClient, nodeEnvironment);
+            etcdHeartbeat = new ETCDHeartbeat(localNode, etcdClient, nodeEnvironment);
             etcdHeartbeat.start();
         } catch (IOException | ExecutionException | InterruptedException e) {
             throw new RuntimeException(e);

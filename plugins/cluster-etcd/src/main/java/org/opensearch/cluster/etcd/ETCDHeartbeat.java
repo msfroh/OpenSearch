@@ -10,9 +10,7 @@ import org.opensearch.env.NodeEnvironment;
 import io.etcd.jetcd.KV;
 import org.opensearch.monitor.os.OsProbe;
 import org.opensearch.monitor.os.OsStats;
-import org.opensearch.monitor.jvm.JvmService;
 import org.opensearch.monitor.jvm.JvmStats;
-import org.opensearch.common.settings.Settings;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -20,6 +18,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutionException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.core.xcontent.XContentBuilder;
+import org.opensearch.common.xcontent.XContentType;
+import java.io.ByteArrayOutputStream;
+import java.util.HashMap;
+import java.util.Map;
+
 public class ETCDHeartbeat {
     private static final long HEARTBEAT_INTERVAL_SECONDS = 5;
     private final Logger logger = LogManager.getLogger(getClass());
@@ -31,10 +36,10 @@ public class ETCDHeartbeat {
     private final ByteSequence nodeStateKey;
     private final NodeEnvironment nodeEnvironment;
 
-    public ETCDHeartbeat(String nodeName, String nodeId, String ephemeralId, Client etcdClient, NodeEnvironment nodeEnvironment) {
-        this.nodeName = nodeName;
-        this.nodeId = nodeId;
-        this.ephemeralId = ephemeralId;
+    public ETCDHeartbeat(DiscoveryNode localNode, Client etcdClient, NodeEnvironment nodeEnvironment) {
+        this.nodeName = localNode.getName();
+        this.nodeId = localNode.getId();
+        this.ephemeralId = localNode.getEphemeralId();
         this.etcdClient = etcdClient;
         this.scheduler = Executors.newSingleThreadScheduledExecutor();
         this.nodeStateKey = ByteSequence.from("actual-state/node-state/" + nodeName, StandardCharsets.UTF_8);
@@ -89,15 +94,39 @@ public class ETCDHeartbeat {
         ByteSizeValue heapMax = jvmStats.getMem().getHeapMax();
         ByteSizeValue heapUsed = jvmStats.getMem().getHeapUsed();
         
+        // Build heartbeat data as a Map
+        Map<String, Object> heartbeatData = new HashMap<>();
+        heartbeatData.put("timestamp", System.currentTimeMillis());
+        heartbeatData.put("nodeName", nodeName);
+        heartbeatData.put("nodeId", nodeId);
+        heartbeatData.put("ephemeralId", ephemeralId);
+        heartbeatData.put("heartbeatIntervalSeconds", HEARTBEAT_INTERVAL_SECONDS);
+        heartbeatData.put("cpuUsedPercent", cpuPercent);
+        heartbeatData.put("memoryUsedPercent", memoryPercent);
+        heartbeatData.put("memoryMaxMB", memoryMax.getMb());
+        heartbeatData.put("memoryUsedMB", memoryUsed.getMb());
+        heartbeatData.put("heapMaxMB", heapMax.getMb());
+        heartbeatData.put("heapUsedMB", heapUsed.getMb());
+        heartbeatData.put("heapUsedPercent", heapUsedPercent);
+        heartbeatData.put("diskTotalMB", diskTotalMB);
+        heartbeatData.put("diskAvailableMB", diskAvailableMB);
 
         try {
             KV kvClient = etcdClient.getKVClient();
-            String heartbeatValue = String.format("{\"timestamp\":%d,\"nodeName\":\"%s\",\"nodeId\":\"%s\",\"ephemeralId\":\"%s\", \"heartbeatIntervalSeconds\":%d,\"cpuUsedPercent\":%d,\"memoryUsedPercent\":%d,\"memoryMaxMB\":%d,\"memoryUsedMB\":%d,\"heapMaxMB\":%d,\"heapUsedMB\":%d,\"heapUsedPercent\":%d,\"diskTotalMB\":%d,\"diskAvailableMB\":%d}",
-                System.currentTimeMillis(), nodeName, nodeId, ephemeralId, HEARTBEAT_INTERVAL_SECONDS, cpuPercent, memoryPercent, memoryMax.getMb(), memoryUsed.getMb(), heapMax.getMb(), heapUsed.getMb(), heapUsedPercent, diskTotalMB, diskAvailableMB);
-            ByteSequence value = ByteSequence.from(heartbeatValue, StandardCharsets.UTF_8);
+            
+            // Convert Map to JSON using XContent
+            ByteArrayOutputStream jsonStream = new ByteArrayOutputStream();
+            try (XContentBuilder jsonBuilder = XContentType.JSON.contentBuilder(jsonStream)) {
+                jsonBuilder.map(heartbeatData);
+            }
+            byte[] jsonBytes = jsonStream.toByteArray();
+            
+            ByteSequence value = ByteSequence.from(jsonBytes);
             kvClient.put(nodeStateKey, value).get();
-        } catch (InterruptedException | ExecutionException e) {
-            Thread.currentThread().interrupt();
+        } catch (InterruptedException | ExecutionException | IOException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             throw new RuntimeException("Failed to publish heartbeat", e);
         }
     }
