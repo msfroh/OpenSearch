@@ -104,14 +104,6 @@ public class ETCDHeartbeat {
         int heapUsedPercent = jvmStats.getMem().getHeapUsedPercent();  
         ByteSizeValue heapMax = jvmStats.getMem().getHeapMax();
         ByteSizeValue heapUsed = jvmStats.getMem().getHeapUsed();
-
-            // Add node shard routing information
-        try {
-            ClusterState clusterState = clusterService.state();
-            Map<String, List<Map<String, Object>>> nodeRoutingMap = getNodeRoutingMap(clusterState);
-        } catch (Exception e) {
-            logger.error("Failed to get node routing information", e);
-        }
         
         // Build heartbeat data as a Map
         Map<String, Object> heartbeatData = new HashMap<>();
@@ -129,8 +121,15 @@ public class ETCDHeartbeat {
         heartbeatData.put("heapUsedPercent", heapUsedPercent);
         heartbeatData.put("diskTotalMB", diskTotalMB);
         heartbeatData.put("diskAvailableMB", diskAvailableMB);
-        heartbeatData.put("nodeRouting", nodeRoutingMap);
         
+        // Add node shard routing information
+        try {
+            ClusterState clusterState = clusterService.state();
+            Map<String, List<Map<String, Object>>> nodeRoutingMap = getNodeRoutingMap(clusterState);
+            heartbeatData.put("nodeRouting", nodeRoutingMap);
+        } catch (Exception e) {
+            logger.error("Failed to get node routing information", e);
+        }
 
         try {
             KV kvClient = etcdClient.getKVClient();
@@ -156,35 +155,31 @@ public class ETCDHeartbeat {
     private Map<String, List<Map<String, Object>>> getNodeRoutingMap(ClusterState clusterState) {
         Map<String, List<Map<String, Object>>> nodeRoutingMap = new HashMap<>();
         
-        // Iterate through all indices and their shards to find ones assigned to this node
+        // Iterate through all indices and their shards - report full cluster view
         for (IndexRoutingTable indexRoutingTable : clusterState.getRoutingTable()) {
             String indexName = indexRoutingTable.getIndex().getName();
-            List<Map<String, Object>> nodeShards = new ArrayList<>();
+            List<Map<String, Object>> allShards = new ArrayList<>();
             
             for (IndexShardRoutingTable shardRoutingTable : indexRoutingTable) {
                 int shardId = shardRoutingTable.shardId().id();
-                
-                // Check each shard routing in this shard table
+                // Include all shards regardless of which node they're assigned to
                 for (ShardRouting shardRouting : shardRoutingTable) {
-                    // Only include shards assigned to this node
-                    if (shardRouting.assignedToNode() && nodeId.equals(shardRouting.currentNodeId())) {
-                        Map<String, Object> shardInfo = new HashMap<>();
-                        shardInfo.put("shardId", shardId);
-                        shardInfo.put("primary", shardRouting.primary());
-                        shardInfo.put("state", shardRouting.state().name());
-                        shardInfo.put("relocating", shardRouting.relocating());
-                        if (shardRouting.relocating()) {
-                            shardInfo.put("relocatingNodeId", shardRouting.relocatingNodeId());
-                        }
-                        shardInfo.put("allocationId", shardRouting.allocationId().getId());
-                        nodeShards.add(shardInfo);
+                    Map<String, Object> shardInfo = new HashMap<>();
+                    shardInfo.put("shardId", shardId);
+                    shardInfo.put("primary", shardRouting.primary());
+                    shardInfo.put("state", shardRouting.state().name());
+                    shardInfo.put("relocating", shardRouting.relocating());
+                    if (shardRouting.relocating()) {
+                        shardInfo.put("relocatingNodeId", shardRouting.relocatingNodeId());
                     }
+                    shardInfo.put("allocationId", shardRouting.allocationId().getId());
+                    shardInfo.put("currentNodeId", shardRouting.currentNodeId());
+                    allShards.add(shardInfo);
                 }
             }
             
-            // Only add the index if it has shards on this node
-            if (!nodeShards.isEmpty()) {
-                nodeRoutingMap.put(indexName, nodeShards);
+            if (!allShards.isEmpty()) {
+                nodeRoutingMap.put(indexName, allShards);
             }
         }
         
