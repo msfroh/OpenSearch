@@ -43,7 +43,6 @@ public class ETCDHeartbeat {
     private final Client etcdClient;
     private final ScheduledExecutorService scheduler;
     private final ByteSequence nodeStateKey;
-    private final ByteSequence heartbeatKey;
     private final NodeEnvironment nodeEnvironment;
     private final ClusterService clusterService;
 
@@ -55,11 +54,9 @@ public class ETCDHeartbeat {
         this.port = localNode.getAddress().getPort();
         this.etcdClient = etcdClient;
         this.scheduler = Executors.newSingleThreadScheduledExecutor();
-        // <cluster-name>/search-unit/<search-name>/actual-state
         String clusterName = clusterService.getClusterName().value();
-        this.nodeStateKey = ByteSequence.from(clusterName + "/search-unit/" + nodeName + "/actual-state", StandardCharsets.UTF_8);
-        // heartbeat/<node-name> for coordinator lookup
-        this.heartbeatKey = ByteSequence.from("heartbeat/" + nodeName, StandardCharsets.UTF_8);
+        String statePath = ETCDPathUtils.buildNodeActualStatePath(clusterName, nodeName);
+        this.nodeStateKey = ByteSequence.from(statePath, StandardCharsets.UTF_8);
         this.nodeEnvironment = nodeEnvironment;
         this.clusterService = clusterService;
     }
@@ -152,7 +149,6 @@ public class ETCDHeartbeat {
             
             ByteSequence value = ByteSequence.from(jsonBytes);
             kvClient.put(nodeStateKey, value).get();
-            kvClient.put(heartbeatKey, value).get();
         } catch (InterruptedException | ExecutionException | IOException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();

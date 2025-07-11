@@ -73,7 +73,7 @@ import java.util.concurrent.ExecutionException;
  * }
  * </pre>
  * 
- * Health check format (stored at heartbeat/{node_name} key):
+ * Health check format (stored at {cluster_name}/search-unit/{node_name}/actual-state):
  * <pre>
  * {
  *   "nodeId": "unique-node-id",
@@ -87,7 +87,6 @@ import java.util.concurrent.ExecutionException;
  */
 public class ETCDStateDeserializer {
     private static final Logger LOGGER = LogManager.getLogger(ETCDStateDeserializer.class);
-    private static final String HEALTH_CHECK_PREFIX = "heartbeat/";
 
     /**
      * Deserializes the node configuration stored in ETCD. Will also read the k/v pairs for each index
@@ -95,12 +94,14 @@ public class ETCDStateDeserializer {
      * <p>
      * For now, let's assume that we store JSON bytes in ETCD.
      *
+     * @param localNode the local discovery node
      * @param byteSequence the serialized node state
-     * @param etcdClient   the ETCD client that we'll use to retrieve index metadata for local shards
+     * @param etcdClient the ETCD client that we'll use to retrieve index metadata for local shards
+     * @param clusterName the cluster name used to build paths for health lookups
      * @return the relevant node state
      */
     @SuppressWarnings("unchecked")
-    public static NodeState deserializeNodeState(DiscoveryNode localNode, ByteSequence byteSequence, Client etcdClient) throws IOException {
+    public static NodeState deserializeNodeState(DiscoveryNode localNode, ByteSequence byteSequence, Client etcdClient, String clusterName) throws IOException {
         Map<String, Object> map;
         try (XContentParser parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.THROW_UNSUPPORTED_OPERATION, byteSequence.getBytes())) {
             map = parser.map();
@@ -112,14 +113,13 @@ public class ETCDStateDeserializer {
             }
             return readDataNodeState(localNode, etcdClient, (Map<String, Map<String, String>>) map.get("local_shards"));
         } else if (map.containsKey("remote_shards")) {
-            return readCoordinatorNodeState(localNode, etcdClient, (Map<String, Object>) map.get("remote_shards"));
+            return readCoordinatorNodeState(localNode, etcdClient, (Map<String, Object>) map.get("remote_shards"), clusterName);
         }
         throw new IllegalStateException("Neither local nor remote shards are present in the node state. Node state should have been removed.");
-
     }
 
     @SuppressWarnings("unchecked")
-    private static CoordinatorNodeState readCoordinatorNodeState(DiscoveryNode localNode, Client etcdClient, Map<String, Object> remoteShards) throws IOException {
+    private static CoordinatorNodeState readCoordinatorNodeState(DiscoveryNode localNode, Client etcdClient, Map<String, Object> remoteShards, String clusterName) throws IOException {
         Map<String, Object> indices = (Map<String, Object>) remoteShards.get("indices");
         Map<String, NodeHealthInfo> nodeHealthMap = new HashMap<>();
         
@@ -137,7 +137,7 @@ public class ETCDStateDeserializer {
             }
         }
         
-        lookupNodeHealthInfo(etcdClient, nodeHealthMap);
+        lookupNodeHealthInfo(etcdClient, nodeHealthMap, clusterName);
         
         List<RemoteNode> remoteNodes = new ArrayList<>();
         for (Map.Entry<String, NodeHealthInfo> entry : nodeHealthMap.entrySet()) {
@@ -213,13 +213,13 @@ public class ETCDStateDeserializer {
     }
 
 
-    private static void lookupNodeHealthInfo(Client etcdClient, Map<String, NodeHealthInfo> nodeHealthMap) throws IOException {
+    private static void lookupNodeHealthInfo(Client etcdClient, Map<String, NodeHealthInfo> nodeHealthMap, String clusterName) throws IOException {
         try (KV kvClient = etcdClient.getKVClient()) {
             List<CompletableFuture<GetResponse>> futures = new ArrayList<>();
             List<String> nodeNames = new ArrayList<>();
             
             for (String nodeName : nodeHealthMap.keySet()) {
-                String healthKey = HEALTH_CHECK_PREFIX + nodeName;
+                String healthKey = ETCDPathUtils.buildNodeActualStatePath(clusterName, nodeName);
                 futures.add(kvClient.get(ByteSequence.from(healthKey, StandardCharsets.UTF_8)));
                 nodeNames.add(nodeName);
             }
