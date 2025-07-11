@@ -129,57 +129,32 @@ EOF
 
 ### Add a coordinator
 
-In order for the coordinator node to complete a successful handshake with the data nodes, they must agree on the
-data nodes' persistent id and ephemeral_id, which are both generated on startup.
+The coordinator automatically resolves node names to node IDs by reading health data, eliminating the need to manually extract node IDs and ephemeral IDs.
 
 ```bash
-# Get the node ID and ephemeral ID from the first data node.
-% DATA_NODE1_ID=$(curl 'http://localhost:9201/_cluster/state?local' | jq -r '.nodes | keys[0]' )
-% DATA_NODE1_EPHEMERAL_ID=$(curl 'http://localhost:9201/_cluster/state?local' | jq -r ".nodes.[\"${DATA_NODE1_ID}\"].ephemeral_id")
-
-# Get the node ID and ephemeral ID from the second data node.
-% DATA_NODE2_ID=$(curl 'http://localhost:9202/_cluster/state?local' | jq -r '.nodes | keys[0]' )
-% DATA_NODE2_EPHEMERAL_ID=$(curl 'http://localhost:9202/_cluster/state?local' | jq -r ".nodes.[\"${DATA_NODE2_ID}\"].ephemeral_id")
-
-# Tell the coordinator about the data nodes and that shard 0 is on the first data node and shard 1 is on the second.
-# Note that the coordinator will not fetch the index metadata, which is why we must specify the index UUID.
+# Tell the coordinator about the data nodes using their node names (not IDs).
 % cat << EOF | etcdctl put runTask-0
 {
   "remote_shards": {
-    "remote_nodes": [
-      {
-        "node_id": "${DATA_NODE1_ID}",       
-        "ephemeral_id": "${DATA_NODE1_EPHEMERAL_ID}",
-        "address": "127.0.0.1",
-        "port": 9301
-      },
-      {
-        "node_id": "${DATA_NODE2_ID}",       
-        "ephemeral_id": "${DATA_NODE2_EPHEMERAL_ID}",
-        "address": "127.0.0.1",
-        "port": 9302
-      }
-    ],
     "indices": {
       "myindex": {
         "uuid" : "E8F2-ebqQ1-U4SL6NoPEyw",
         "shard_routing" : [
           [
-            {"node_id": "${DATA_NODE1_ID}", "primary": true }
+            {"node_name": "runTask-1", "primary": true }
           ],
           [
-            {"node_id": "${DATA_NODE2_ID}", "primary" : true }
+            {"node_name": "runTask-2", "primary": true }
           ]
         ]
       }
     }
   }
 }
-EOF 
+EOF
 
 # Search via the coordinator node. You'll see both documents added above
 % curl 'http://localhost:9200/myindex/_search?pretty'
-
 
 # Index a batch of documents (surely hitting both shards) via the coordinator node
 % curl -X POST -H 'Content-Type: application/json' http://localhost:9200/myindex/_bulk -d '
@@ -203,7 +178,18 @@ EOF
 
 # Search via the coordinator node. You'll see 10 documents. If you search each data node you'll see around half.
 % curl 'http://localhost:9200/myindex/_search?pretty'
+```
 
+### Heartbeat and Health Data
+
+Nodes automatically publish health and status information to ETCD at the path `{cluster_name}/search-unit/{node_name}/actual-state`.
+
+```bash
+# View heartbeat data for all nodes
+% etcdctl get "runTask/search-unit/" --prefix
+
+# View specific node's health data  
+% etcdctl get "runTask/search-unit/<nodename>/actual-state"
 ```
 
 <img src="https://opensearch.org/assets/img/opensearch-logo-themed.svg" height="64px">
