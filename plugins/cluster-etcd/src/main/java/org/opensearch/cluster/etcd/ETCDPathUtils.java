@@ -14,11 +14,6 @@ package org.opensearch.cluster.etcd;
  */
 public class ETCDPathUtils {
     
-   
-    public static String buildControlTaskPath(String clusterName, String taskName) {
-        return clusterName + "/ctl-tasks/" + taskName;
-    }
-   
     public static String buildSearchUnitConfigPath(String clusterName, String searchName) {
         return clusterName + "/search-unit/" + searchName + "/conf";
     }
