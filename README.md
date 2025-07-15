@@ -66,7 +66,7 @@ locally. The first will serve as a coordinator, while the other two will be data
 
 ```bash
 # Write some index metadata for an index. For now, this is the smallest valid metadata I've been able to create.
-% cat << EOF | etcdctl put myindex 
+% cat << EOF | etcdctl put runTask/indices/myindex/conf
 {
   "myindex": {
     "version":1,
@@ -105,10 +105,10 @@ locally. The first will serve as a coordinator, while the other two will be data
 EOF
 
 # Assign primary for shard 0 of myindex to the node listening on port 9201/9301
-% etcdctl put runTask-1 '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
+% etcdctl put runTask/search-unit/runTask-1/goal-state '{"local_shards":{"myindex":{"0":"PRIMARY"}}}'
 
 # Assign primary for shard 1 of myindex to the node listening on port 9202/9302
-% etcdctl put runTask-2 '{"local_shards":{"myindex":{"1":"PRIMARY"}}}'
+% etcdctl put runTask/search-unit/runTask-2/goal-state '{"local_shards":{"myindex":{"1":"PRIMARY"}}}'
 
 # Check the local cluster state on each data node
 % curl 'http://localhost:9201/_cluster/state?local&pretty'
@@ -133,7 +133,7 @@ The coordinator automatically resolves node names to node IDs by reading health 
 
 ```bash
 # Tell the coordinator about the data nodes using their node names (not IDs).
-% cat << EOF | etcdctl put runTask-0
+% cat << EOF | etcdctl put runTask/search-unit/runTask-0/goal-state
 {
   "remote_shards": {
     "indices": {
