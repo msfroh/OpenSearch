@@ -64,42 +64,42 @@ locally. The first will serve as a coordinator, while the other two will be data
 
 ### Push some state to etcd to start the data nodes
 
+The cluster-etcd plugin now uses a split metadata approach that separates index configuration into distinct etcd keys:
+
+- **Settings**: `/indices/{index}/settings` - Basic index configuration needed by all nodes
+- **Mappings**: `/indices/{index}/mappings` - Field definitions needed primarily by data nodes  
+
+This approach reduces etcd storage requirements and simplifies control plane logic by filtering out data plane implementation details.
+
 ```bash
-# Write some index metadata for an index. For now, this is the smallest valid metadata I've been able to create.
-% cat << EOF | etcdctl put runTask/indices/myindex/conf
+# Write index settings and mappings separately (new split metadata approach)
+# Settings are needed by both data nodes and coordinators
+% cat << EOF | etcdctl put runTask/indices/myindex/settings
 {
-  "myindex": {
-    "version":1,
-    "mapping_version":1,
-    "settings_version":1,
-    "aliases_version":1,
-    "state":"open",
-    "settings":{
-      "index":{
-        "number_of_shards":"1",
-        "number_of_replicas":"0",
-        "uuid":"E8F2-ebqQ1-U4SL6NoPEyw",
-        "version": {
-          "created":"137227827"
+  "index": {
+    "number_of_shards": "1",
+    "number_of_replicas": "0",
+    "uuid": "E8F2-ebqQ1-U4SL6NoPEyw",
+    "version": {
+      "created": "137227827"
+    }
+  }
+}
+EOF
+
+# Mappings are needed by data nodes only (flattened structure)
+% cat << EOF | etcdctl put runTask/indices/myindex/mappings
+{
+  "properties": {
+    "title": {
+      "type": "text",
+      "fields": {
+        "keyword": {
+          "type": "keyword",
+          "ignore_above": 256
         }
       }
-    },
-    "mappings":{
-      "_doc":{
-        "properties":{
-          "title":{
-            "type":"text",
-            "fields":{
-              "keyword":{
-                "type":"keyword",
-                "ignore_above":256
-              }
-            }
-          }
-        }
-      }
-    },
-    "primary_terms":[1,1]
+    }
   }
 }
 EOF
@@ -109,6 +109,13 @@ EOF
 
 # Assign primary for shard 1 of myindex to the node listening on port 9202/9302
 % etcdctl put runTask/search-unit/runTask-2/goal-state '{"local_shards":{"myindex":{"1":"PRIMARY"}}}'
+
+# Verify the split metadata was stored correctly
+% etcdctl get "runTask/indices/myindex/settings"
+% etcdctl get "runTask/indices/myindex/mappings"
+
+# Check all keys to see the new structure
+% etcdctl get "" --from-key --keys-only
 
 # Check the local cluster state on each data node
 % curl 'http://localhost:9201/_cluster/state?local&pretty'
