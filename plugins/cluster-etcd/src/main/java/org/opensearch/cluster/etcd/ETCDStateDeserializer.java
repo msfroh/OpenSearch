@@ -238,34 +238,38 @@ public class ETCDStateDeserializer {
         try {
             // Fetch and parse settings
             GetResponse settingsResponse = settingsFuture.get();
-            if (!settingsResponse.getKvs().isEmpty()) {
-                KeyValue settingsKv = settingsResponse.getKvs().get(0);
-                try (XContentParser parser = JsonXContent.jsonXContent.createParser(
-                    NamedXContentRegistry.EMPTY, 
-                    DeprecationHandler.THROW_UNSUPPORTED_OPERATION, 
-                    settingsKv.getValue().getBytes()
-                )) {
-                    indexSettings = Settings.fromXContent(parser);
-                }
+            if (settingsResponse.getKvs().isEmpty()) {
+                throw new IllegalStateException("Settings response is empty");
             }
+            KeyValue settingsKv = settingsResponse.getKvs().get(0);
+            try (XContentParser parser = JsonXContent.jsonXContent.createParser(
+                NamedXContentRegistry.EMPTY, 
+                DeprecationHandler.THROW_UNSUPPORTED_OPERATION, 
+                settingsKv.getValue().getBytes()
+            )) {
+                indexSettings = Settings.fromXContent(parser);
+            }
+        
             
             // Fetch and parse mappings
             GetResponse mappingsResponse = mappingsFuture.get();
-            if (!mappingsResponse.getKvs().isEmpty()) {
-                KeyValue mappingsKv = mappingsResponse.getKvs().get(0);
-                try (XContentParser parser = JsonXContent.jsonXContent.createParser(
-                    NamedXContentRegistry.EMPTY, 
-                    DeprecationHandler.THROW_UNSUPPORTED_OPERATION, 
-                    mappingsKv.getValue().getBytes()
-                )) {
-                    // Parse the mapping JSON and create MappingMetadata
-                    Map<String, Object> mappingMap = parser.map();
-                    if (!mappingMap.isEmpty()) {
-                        // Assume single mapping type for simplicity 
-                        mappingMetadata = new MappingMetadata("_doc", mappingMap);
-                    }
+            if (mappingsResponse.getKvs().isEmpty()) {
+                throw new IllegalStateException("Mappings response is empty");
+            }
+            KeyValue mappingsKv = mappingsResponse.getKvs().get(0);
+            try (XContentParser parser = JsonXContent.jsonXContent.createParser(
+                NamedXContentRegistry.EMPTY, 
+                DeprecationHandler.THROW_UNSUPPORTED_OPERATION, 
+                mappingsKv.getValue().getBytes()
+            )) {
+                // Parse the mapping JSON and create MappingMetadata
+                Map<String, Object> mappingMap = parser.map();
+                if (!mappingMap.isEmpty()) {
+                    // Assume single mapping type for simplicity 
+                    mappingMetadata = new MappingMetadata("_doc", mappingMap);
                 }
             }
+            
         } catch (InterruptedException | ExecutionException e) {
             throw new RuntimeException("Failed to fetch index metadata parts from etcd", e);
         }
