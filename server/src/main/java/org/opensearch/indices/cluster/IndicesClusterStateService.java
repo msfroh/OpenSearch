@@ -677,13 +677,10 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
     private void createShard(DiscoveryNodes nodes, RoutingTable routingTable, ShardRouting shardRouting, ClusterState state) {
         assert shardRouting.initializing() : "only allow shard creation for initializing shard but was " + shardRouting;
 
-        DiscoveryNode sourceNode = null;
-        if (shardRouting.recoverySource().getType() == Type.PEER) {
-            sourceNode = findSourceNodeForPeerRecovery(logger, routingTable, nodes, shardRouting);
-            if (sourceNode == null) {
-                logger.trace("ignoring initializing shard {} - no source node can be found.", shardRouting.shardId());
-                return;
-            }
+        DiscoveryNode sourceNode = findSourceNodeForPeerRecovery(logger, routingTable, nodes, shardRouting);
+        if (sourceNode == null && shardRouting.recoverySource().getType() == Type.PEER) {
+            logger.trace("ignoring initializing shard {} - no source node can be found.", shardRouting.shardId());
+            return;
         }
 
         try {

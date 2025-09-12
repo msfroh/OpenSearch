@@ -1297,6 +1297,9 @@ public class IndicesService extends AbstractLifecycleComponent
             mergedSegmentPublisher,
             referencedSegmentsPublisher
         );
+        if (indexShard == null) {
+            return null;
+        }
         indexShard.addShardFailureCallback(onShardFailure);
         indexShard.startRecovery(recoveryState, recoveryTargetService, recoveryListener, repositoriesService, mapping -> {
             assert recoveryState.getRecoverySource().getType() == RecoverySource.Type.LOCAL_SHARDS

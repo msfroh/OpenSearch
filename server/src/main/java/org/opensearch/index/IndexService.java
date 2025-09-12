@@ -664,6 +664,10 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             throw new IllegalStateException("Can't create shard " + routing.shardId() + ", closed");
         }
         final Settings indexSettings = this.indexSettings.getSettings();
+        if (this.indexSettings.includeAllocationIdInRemotePath() && this.indexSettings.isRemoteStoreEnabled() && routing.primary() == false && sourceNode == null) {
+            logger.trace("skipping index shard creation because source node is null");
+            return null;
+        }
         final ShardId shardId = routing.shardId();
         boolean success = false;
         Store store = null;
@@ -701,7 +705,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                         this.indexSettings.getUUID(),
                         shardId,
                         this.indexSettings.getRemoteStorePathStrategy(),
-                        this.indexSettings.getRemoteStoreSegmentPathPrefix()
+                        getRemoteStoreSegmentPathPrefix(routing.primary(), sourceNode, targetNode)
                     );
                 }
                 // When an instance of Store is created, a shardlock is created which is released on closing the instance of store.
@@ -811,6 +815,17 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 closeShard("initialization failed", shardId, indexShard, store, eventListener);
             }
         }
+    }
+
+    private String getRemoteStoreSegmentPathPrefix(boolean primary, DiscoveryNode sourceNode, DiscoveryNode targetNode) {
+        if (this.indexSettings.includeAllocationIdInRemotePath()) {
+            if (primary) {
+                return targetNode.getId();
+            } else {
+                return sourceNode.getId();
+            }
+        }
+        return this.indexSettings.getRemoteStoreSegmentPathPrefix();
     }
 
     /*
