@@ -17,8 +17,7 @@ opensearchplugin {
 dependencies {
 }
 
-// PoC plugin — skip tests by default.
-test.enabled = false
+// PoC plugin — most checks disabled, but unit tests run.
 testingConventions.enabled = false
 forbiddenApisMain.enabled = false
 forbiddenApisTest.enabled = false
