@@ -268,13 +268,11 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     private final CachedSupplier<Settings> persistentSettingsSupplier;
     private final CachedSupplier<Settings> settingsSupplier;
     private final CachedSupplier<DiffableStringMap> hashesOfConsistentSettingsSupplier;
-    private final Map<String, IndexMetadata> indices;
+    private final LazyIndices indices;
     private final CachedSupplier<TemplatesMetadata> templatesSupplier;
     private final CachedSupplier<Map<String, Custom>> customsSupplier;
 
-    private final transient int totalNumberOfShards; // Transient ? not serializable anyway?
-    private final int totalOpenLocalOnlyIndexShards;
-    private final int totalOpenRemoteCapableIndexShards;
+    private final transient CachedSupplier<int[]> shardCountsSupplier; // [total, openLocal, openRemote]
 
     private final String[] allIndices;
     private final String[] visibleIndices;
@@ -315,7 +313,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             () -> transientSettings,
             () -> persistentSettings,
             () -> hashesOfConsistentSettings,
-            indices,
+            LazyIndices.ofEager(indices),
             () -> new TemplatesMetadata(templates),
             () -> Collections.unmodifiableMap(customs),
             allIndices,
@@ -331,14 +329,11 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
 
     /**
      * Lazy-friendly constructor. The supplier-typed components are materialized on first
-     * access via {@link CachedSupplier}. Intended for suppliers (e.g., file-backed) that can
-     * stream components from disk; eager callers should use the public {@link Builder} which
-     * routes through the eager constructor above.
-     * <p>
-     * {@code indices} is still passed eagerly here; per-index laziness arrives in a follow-up
-     * change that introduces a per-key supplier map. The derived fields (totalNumberOfShards,
-     * the index-name arrays, indicesLookup, systemTemplatesLookup) are likewise pre-computed
-     * by the {@link Builder} today and remain eager until that change.
+     * access via {@link CachedSupplier}; the {@code indices} map is itself a {@link LazyIndices}
+     * so per-index materialization is deferred until {@code index(name)} (or a bulk
+     * accessor) requests it. The {@code shardCountsSupplier} iterates the indices on first
+     * access, so callers of {@link #getTotalNumberOfShards()} / friends still pay for full
+     * materialization — but tasks that never touch the counts never pay.
      */
     Metadata(
         String clusterUUID,
@@ -348,7 +343,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         Supplier<Settings> transientSettingsSupplier,
         Supplier<Settings> persistentSettingsSupplier,
         Supplier<DiffableStringMap> hashesOfConsistentSettingsSupplier,
-        final Map<String, IndexMetadata> indices,
+        LazyIndices indices,
         Supplier<TemplatesMetadata> templatesSupplier,
         Supplier<Map<String, Custom>> customsSupplier,
         String[] allIndices,
@@ -373,25 +368,27 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             () -> Settings.builder().put(this.persistentSettingsSupplier.get()).put(this.transientSettingsSupplier.get()).build()
         );
         this.hashesOfConsistentSettingsSupplier = asCached(hashesOfConsistentSettingsSupplier);
-        this.indices = Collections.unmodifiableMap(indices);
+        this.indices = indices;
         this.templatesSupplier = asCached(templatesSupplier);
         this.customsSupplier = asCached(customsSupplier);
-        int totalNumberOfShards = 0;
-        int totalOpenLocalOnlyIndexShards = 0;
-        int totalOpenRemoteCapableIndexShards = 0;
-        for (IndexMetadata cursor : indices.values()) {
-            totalNumberOfShards += cursor.getTotalNumberOfShards();
-            if (IndexMetadata.State.OPEN.equals(cursor.getState())) {
-                if (RoutingPool.getIndexPool(cursor) == RoutingPool.REMOTE_CAPABLE) {
-                    totalOpenRemoteCapableIndexShards += cursor.getTotalNumberOfShards();
-                } else {
-                    totalOpenLocalOnlyIndexShards += cursor.getTotalNumberOfShards();
+        // Counts are deferred — touching them forces every per-index entry to materialize,
+        // but a task that never needs a total can finish without ever loading the indices.
+        this.shardCountsSupplier = new CachedSupplier<>(() -> {
+            int totalNumberOfShards = 0;
+            int totalOpenLocalOnlyIndexShards = 0;
+            int totalOpenRemoteCapableIndexShards = 0;
+            for (IndexMetadata cursor : this.indices.values()) {
+                totalNumberOfShards += cursor.getTotalNumberOfShards();
+                if (IndexMetadata.State.OPEN.equals(cursor.getState())) {
+                    if (RoutingPool.getIndexPool(cursor) == RoutingPool.REMOTE_CAPABLE) {
+                        totalOpenRemoteCapableIndexShards += cursor.getTotalNumberOfShards();
+                    } else {
+                        totalOpenLocalOnlyIndexShards += cursor.getTotalNumberOfShards();
+                    }
                 }
             }
-        }
-        this.totalNumberOfShards = totalNumberOfShards;
-        this.totalOpenLocalOnlyIndexShards = totalOpenLocalOnlyIndexShards;
-        this.totalOpenRemoteCapableIndexShards = totalOpenRemoteCapableIndexShards;
+            return new int[] { totalNumberOfShards, totalOpenLocalOnlyIndexShards, totalOpenRemoteCapableIndexShards };
+        });
 
         this.allIndices = allIndices;
         this.visibleIndices = visibleIndices;
@@ -968,7 +965,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
      * @return The total number shards from all indices.
      */
     public int getTotalNumberOfShards() {
-        return this.totalNumberOfShards;
+        return shardCountsSupplier.get()[0];
     }
 
     /**
@@ -977,7 +974,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
      * @return The total number of open shards from all indices.
      */
     public int getTotalOpenIndexShards() {
-        return this.totalOpenLocalOnlyIndexShards;
+        return shardCountsSupplier.get()[1];
     }
 
     /**
@@ -986,7 +983,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
      * @return The total number of open shards from all indices.
      */
     public int getTotalOpenRemoteCapableIndexShards() {
-        return this.totalOpenRemoteCapableIndexShards;
+        return shardCountsSupplier.get()[2];
     }
 
     /**

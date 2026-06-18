@@ -37,7 +37,7 @@ public class MetadataLazinessTests extends OpenSearchTestCase {
             counting(Settings.EMPTY, transientCalls),
             counting(Settings.EMPTY, persistentCalls),
             counting(DiffableStringMap.EMPTY, hashesCalls),
-            Collections.emptyMap(),
+            LazyIndices.empty(),
             counting(new TemplatesMetadata(Collections.emptyMap()), templatesCalls),
             counting(Collections.<String, Metadata.Custom>unmodifiableMap(new HashMap<>()), customsCalls),
             new String[0],
@@ -111,6 +111,94 @@ public class MetadataLazinessTests extends OpenSearchTestCase {
         assertSame(CoordinationMetadata.EMPTY_METADATA, metadata.coordinationMetadata());
         assertSame(Settings.EMPTY, metadata.transientSettings());
         assertSame(Settings.EMPTY, metadata.persistentSettings());
+    }
+
+    public void testPerIndexLazinessOnlyMaterializesTouchedEntries() {
+        AtomicInteger fooCalls = new AtomicInteger();
+        AtomicInteger barCalls = new AtomicInteger();
+        AtomicInteger bazCalls = new AtomicInteger();
+
+        IndexMetadata foo = indexMeta("foo");
+        IndexMetadata bar = indexMeta("bar");
+        IndexMetadata baz = indexMeta("baz");
+
+        Map<String, Supplier<IndexMetadata>> entries = new HashMap<>();
+        entries.put("foo", () -> {
+            fooCalls.incrementAndGet();
+            return foo;
+        });
+        entries.put("bar", () -> {
+            barCalls.incrementAndGet();
+            return bar;
+        });
+        entries.put("baz", () -> {
+            bazCalls.incrementAndGet();
+            return baz;
+        });
+
+        LazyIndices lazy = LazyIndices.ofLazy(entries);
+        Metadata metadata = new Metadata(
+            "cluster-uuid",
+            false,
+            1L,
+            () -> CoordinationMetadata.EMPTY_METADATA,
+            () -> Settings.EMPTY,
+            () -> Settings.EMPTY,
+            () -> DiffableStringMap.EMPTY,
+            lazy,
+            () -> new TemplatesMetadata(Collections.emptyMap()),
+            () -> Collections.unmodifiableMap(new HashMap<>()),
+            new String[0],
+            new String[0],
+            new String[0],
+            new String[0],
+            new String[0],
+            new String[0],
+            Collections.unmodifiableSortedMap(new TreeMap<>()),
+            Collections.emptyMap()
+        );
+
+        // Touching one named index materializes only that one.
+        assertSame(foo, metadata.index("foo"));
+        assertEquals(1, fooCalls.get());
+        assertEquals(0, barCalls.get());
+        assertEquals(0, bazCalls.get());
+
+        // Per-key cached: repeated access doesn't re-invoke.
+        metadata.index("foo");
+        metadata.index("foo");
+        assertEquals(1, fooCalls.get());
+
+        // Touching a different name only materializes that one.
+        assertSame(bar, metadata.index("bar"));
+        assertEquals(1, fooCalls.get());
+        assertEquals(1, barCalls.get());
+        assertEquals(0, bazCalls.get());
+
+        // size() / containsKey() should NOT force materialization.
+        assertEquals(3, metadata.indices().size());
+        assertTrue(metadata.indices().containsKey("baz"));
+        assertEquals(0, bazCalls.get());
+
+        // getTotalNumberOfShards() forces every entry — the documented cost of bulk access.
+        metadata.getTotalNumberOfShards();
+        assertEquals(1, bazCalls.get());
+        // …and the count supplier is itself cached.
+        metadata.getTotalNumberOfShards();
+        metadata.getTotalOpenIndexShards();
+        assertEquals(1, bazCalls.get());
+    }
+
+    private static IndexMetadata indexMeta(String name) {
+        return IndexMetadata.builder(name)
+            .settings(
+                Settings.builder()
+                    .put(IndexMetadata.SETTING_VERSION_CREATED, org.opensearch.Version.CURRENT)
+                    .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                    .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                    .build()
+            )
+            .build();
     }
 
     private static <T> Supplier<T> counting(T value, AtomicInteger counter) {
