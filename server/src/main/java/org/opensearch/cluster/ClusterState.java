@@ -52,6 +52,7 @@ import org.opensearch.common.UUIDs;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.CachedSupplier;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.core.common.io.stream.NamedWriteableAwareStreamInput;
@@ -72,6 +73,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.Spliterators;
+import java.util.function.Supplier;
 import java.util.stream.StreamSupport;
 
 import static org.opensearch.cluster.coordination.Coordinator.ZEN1_BWC_TERM;
@@ -166,15 +168,15 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
 
     private final String stateUUID;
 
-    private final RoutingTable routingTable;
+    private final CachedSupplier<RoutingTable> routingTableSupplier;
 
-    private final DiscoveryNodes nodes;
+    private final CachedSupplier<DiscoveryNodes> nodesSupplier;
 
-    private final Metadata metadata;
+    private final CachedSupplier<Metadata> metadataSupplier;
 
-    private final ClusterBlocks blocks;
+    private final CachedSupplier<ClusterBlocks> blocksSupplier;
 
-    private final Map<String, Custom> customs;
+    private final CachedSupplier<Map<String, Custom>> customsSupplier;
 
     private final ClusterName clusterName;
 
@@ -190,11 +192,11 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
             state.clusterName,
             version,
             stateUUID,
-            state.metadata(),
-            state.routingTable(),
-            state.nodes(),
-            state.blocks(),
-            state.customs(),
+            state.metadataSupplier,
+            state.routingTableSupplier,
+            state.nodesSupplier,
+            state.blocksSupplier,
+            state.customsSupplier,
             -1,
             false
         );
@@ -212,16 +214,52 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         int minimumClusterManagerNodesOnPublishingClusterManager,
         boolean wasReadFromDiff
     ) {
+        this(
+            clusterName,
+            version,
+            stateUUID,
+            new CachedSupplier<>(() -> metadata),
+            new CachedSupplier<>(() -> routingTable),
+            new CachedSupplier<>(() -> nodes),
+            new CachedSupplier<>(() -> blocks),
+            new CachedSupplier<>(() -> Collections.unmodifiableMap(customs)),
+            minimumClusterManagerNodesOnPublishingClusterManager,
+            wasReadFromDiff
+        );
+    }
+
+    /**
+     * Lazy constructor: each component is materialized on first access via its supplier.
+     * Intended for suppliers (e.g., file-backed) that can stream components from disk.
+     * The map supplier is responsible for wrapping its result in
+     * {@link Collections#unmodifiableMap} if needed.
+     */
+    ClusterState(
+        ClusterName clusterName,
+        long version,
+        String stateUUID,
+        Supplier<Metadata> metadataSupplier,
+        Supplier<RoutingTable> routingTableSupplier,
+        Supplier<DiscoveryNodes> nodesSupplier,
+        Supplier<ClusterBlocks> blocksSupplier,
+        Supplier<Map<String, Custom>> customsSupplier,
+        int minimumClusterManagerNodesOnPublishingClusterManager,
+        boolean wasReadFromDiff
+    ) {
         this.version = version;
         this.stateUUID = stateUUID;
         this.clusterName = clusterName;
-        this.metadata = metadata;
-        this.routingTable = routingTable;
-        this.nodes = nodes;
-        this.blocks = blocks;
-        this.customs = Collections.unmodifiableMap(customs);
+        this.metadataSupplier = asCached(metadataSupplier);
+        this.routingTableSupplier = asCached(routingTableSupplier);
+        this.nodesSupplier = asCached(nodesSupplier);
+        this.blocksSupplier = asCached(blocksSupplier);
+        this.customsSupplier = asCached(customsSupplier);
         this.minimumClusterManagerNodesOnPublishingClusterManager = minimumClusterManagerNodesOnPublishingClusterManager;
         this.wasReadFromDiff = wasReadFromDiff;
+    }
+
+    private static <T> CachedSupplier<T> asCached(Supplier<T> supplier) {
+        return supplier instanceof CachedSupplier<T> cached ? cached : new CachedSupplier<>(supplier);
     }
 
     public long term() {
@@ -252,7 +290,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
     }
 
     public DiscoveryNodes nodes() {
-        return this.nodes;
+        return nodesSupplier.get();
     }
 
     public DiscoveryNodes getNodes() {
@@ -260,7 +298,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
     }
 
     public Metadata metadata() {
-        return this.metadata;
+        return metadataSupplier.get();
     }
 
     public Metadata getMetadata() {
@@ -268,11 +306,11 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
     }
 
     public CoordinationMetadata coordinationMetadata() {
-        return metadata.coordinationMetadata();
+        return metadata().coordinationMetadata();
     }
 
     public RoutingTable routingTable() {
-        return routingTable;
+        return routingTableSupplier.get();
     }
 
     public RoutingTable getRoutingTable() {
@@ -280,28 +318,28 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
     }
 
     public ClusterBlocks blocks() {
-        return this.blocks;
+        return blocksSupplier.get();
     }
 
     public ClusterBlocks getBlocks() {
-        return blocks;
+        return blocks();
     }
 
     public Map<String, Custom> customs() {
-        return this.customs;
+        return customsSupplier.get();
     }
 
     public Map<String, Custom> getCustoms() {
-        return this.customs;
+        return customs();
     }
 
     public <T extends Custom> T custom(String type) {
-        return (T) customs.get(type);
+        return (T) customs().get(type);
     }
 
     @SuppressWarnings("unchecked")
     public <T extends Custom> T custom(String type, T defaultValue) {
-        return (T) customs.getOrDefault(type, defaultValue);
+        return (T) customs().getOrDefault(type, defaultValue);
     }
 
     public ClusterName getClusterName() {
@@ -335,6 +373,8 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
     public String toString() {
         StringBuilder sb = new StringBuilder();
         final String TAB = "   ";
+        Metadata metadata = metadata();
+        Map<String, Custom> customs = customs();
         sb.append("cluster uuid: ")
             .append(metadata.clusterUUID())
             .append(" [committed: ")
@@ -524,7 +564,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         // nodes
         if (metrics.contains(Metric.NODES)) {
             builder.startObject("nodes");
-            for (DiscoveryNode node : nodes) {
+            for (DiscoveryNode node : nodes()) {
                 node.toXContent(builder, params);
             }
             builder.endObject();
@@ -532,7 +572,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
 
         // meta data
         if (metrics.contains(Metric.METADATA)) {
-            metadata.toXContent(builder, params);
+            metadata().toXContent(builder, params);
         }
 
         // routing table
@@ -578,7 +618,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
             builder.endObject();
         }
         if (metrics.contains(Metric.CUSTOMS)) {
-            for (final Map.Entry<String, Custom> cursor : customs.entrySet()) {
+            for (final Map.Entry<String, Custom> cursor : customs().entrySet()) {
                 builder.startObject(cursor.getKey());
                 cursor.getValue().toXContent(builder, params);
                 builder.endObject();
@@ -776,13 +816,14 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
+        Map<String, Custom> customs = customs();
         clusterName.writeTo(out);
         out.writeLong(version);
         out.writeString(stateUUID);
-        metadata.writeTo(out);
-        routingTable.writeTo(out);
-        nodes.writeToWithAttribute(out);
-        blocks.writeTo(out);
+        metadata().writeTo(out);
+        routingTable().writeTo(out);
+        nodes().writeToWithAttribute(out);
+        blocks().writeTo(out);
         // filter out custom states not supported by the other node
         int numberOfCustoms = 0;
         for (final Custom custom : customs.values()) {
@@ -831,11 +872,16 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
             toUuid = after.stateUUID;
             toVersion = after.version;
             clusterName = after.clusterName;
-            routingTable = after.routingTable.diff(before.routingTable);
-            nodes = after.nodes.diff(before.nodes);
-            metadata = after.metadata.diff(before.metadata);
-            blocks = after.blocks.diff(before.blocks);
-            customs = DiffableUtils.diff(before.customs, after.customs, DiffableUtils.getStringKeySerializer(), CUSTOM_VALUE_SERIALIZER);
+            routingTable = after.routingTable().diff(before.routingTable());
+            nodes = after.nodes().diff(before.nodes());
+            metadata = after.metadata().diff(before.metadata());
+            blocks = after.blocks().diff(before.blocks());
+            customs = DiffableUtils.diff(
+                before.customs(),
+                after.customs(),
+                DiffableUtils.getStringKeySerializer(),
+                CUSTOM_VALUE_SERIALIZER
+            );
             minimumClusterManagerNodesOnPublishingClusterManager = after.minimumClusterManagerNodesOnPublishingClusterManager;
         }
 
@@ -916,11 +962,11 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
             }
             builder.stateUUID(toUuid);
             builder.version(toVersion);
-            builder.routingTable(routingTable.apply(state.routingTable));
-            builder.nodes(nodes.apply(state.nodes));
-            builder.metadata(metadata.apply(state.metadata));
-            builder.blocks(blocks.apply(state.blocks));
-            builder.customs(customs.apply(state.customs));
+            builder.routingTable(routingTable.apply(state.routingTable()));
+            builder.nodes(nodes.apply(state.nodes()));
+            builder.metadata(metadata.apply(state.metadata()));
+            builder.blocks(blocks.apply(state.blocks()));
+            builder.customs(customs.apply(state.customs()));
             builder.minimumClusterManagerNodesOnPublishingClusterManager(minimumClusterManagerNodesOnPublishingClusterManager);
             builder.fromDiff(true);
             return builder.build();
