@@ -38,10 +38,16 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockException;
 import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.AliasMetadata;
+import org.opensearch.cluster.metadata.DataStreamMetadata;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.BlockScope;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.IndexMetadataSection;
+import org.opensearch.cluster.service.filter.IndexScope;
+import org.opensearch.cluster.service.filter.Slices;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.logging.DeprecationLogger;
 import org.opensearch.common.util.concurrent.ThreadContext;
@@ -60,6 +66,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -111,6 +118,27 @@ public class TransportGetAliasesAction extends TransportClusterManagerNodeReadAc
                 ClusterBlockLevel.METADATA_READ,
                 indexNameExpressionResolver.concreteIndexNamesWithSystemIndexAccess(state, request)
             );
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(GetAliasesRequest request) {
+        // Resolution itself always needs SETTINGS+ALIASES+STATE across all indices, since
+        // indexNameExpressionResolver walks the full lookup. The response (findAliases on
+        // resolved indices) reads from those same per-index sections, so the only
+        // narrowable slice here is the per-index block check.
+        Optional<Set<String>> resolved = tryResolveConcreteIndices(request);
+        ClusterStateFilter blocksSlice = resolved.<ClusterStateFilter>map(set -> Slices.blocks(BlockScope.indices(set)))
+            .orElseGet(Slices::allBlocks);
+        return ClusterStateFilter.union(
+            blocksSlice,
+            Slices.indexMetadata(
+                IndexScope.ALL,
+                IndexMetadataSection.SETTINGS,
+                IndexMetadataSection.ALIASES,
+                IndexMetadataSection.STATE
+            ),
+            Slices.metadataCustoms(DataStreamMetadata.TYPE)
+        );
     }
 
     @Override

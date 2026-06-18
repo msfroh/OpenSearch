@@ -37,6 +37,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.action.ActionListenerResponseHandler;
 import org.opensearch.action.ActionRunnable;
+import org.opensearch.action.IndicesRequest;
 import org.opensearch.action.bulk.BackoffPolicy;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
@@ -58,6 +59,8 @@ import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterManagerTaskThrottler;
 import org.opensearch.cluster.service.ClusterManagerThrottlingException;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.ClusterStateSupplier;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.action.ActionResponse;
@@ -77,10 +80,14 @@ import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 import static org.opensearch.Version.V_2_13_0;
 
@@ -177,7 +184,78 @@ public abstract class TransportClusterManagerNodeAction<Request extends ClusterM
         return false;
     }
 
+    /**
+     * Declares the portion of {@link ClusterState} this action needs to satisfy the given
+     * request. A pluggable {@link org.opensearch.cluster.service.ClusterStateSupplier} may
+     * consult this filter to narrow the state it materializes. The default
+     * {@link ClusterStateFilter#FULL_STATE} preserves the historical "read everything"
+     * behaviour for actions that haven't been migrated.
+     */
+    protected ClusterStateFilter requiredState(Request request) {
+        return ClusterStateFilter.FULL_STATE;
+    }
+
+    /**
+     * Returns the state {@link #clusterManagerOperation} should run against. When the
+     * action declares a {@link #requiredState(Request) narrowed filter} AND we are running
+     * on the elected cluster manager AND the registered supplier is filter-aware, the
+     * state comes from {@code supplier.getClusterState(filter)} — possibly a strict
+     * subset of {@code fallback}. Otherwise {@code fallback} (the state the framework
+     * already produced) is returned unchanged. Cluster-block checks and the observer
+     * machinery continue to see the full {@code fallback} state.
+     */
+    protected ClusterState stateForOperation(ClusterState fallback, Request request) {
+        ClusterStateFilter filter = requiredState(request);
+        if (filter.isFullState()) {
+            return fallback;
+        }
+        if (fallback.nodes().isLocalNodeElectedClusterManager() == false) {
+            // Off the cluster manager, the local applier state is authoritative; the
+            // cluster-manager-side supplier (if any) is not the source of truth here.
+            return fallback;
+        }
+        Supplier<ClusterState> supplier = clusterService.getClusterManagerService().getClusterStateSupplier();
+        if (supplier instanceof ClusterStateSupplier filterAware) {
+            try {
+                ClusterState fromSupplier = filterAware.getClusterState(filter);
+                if (fromSupplier != null) {
+                    return fromSupplier;
+                }
+            } catch (Exception e) {
+                logger.debug("filter-aware cluster-state supplier failed; falling back to passed state", e);
+            }
+        }
+        return fallback;
+    }
+
     protected abstract ClusterBlockException checkBlock(Request request, ClusterState state);
+
+    /**
+     * Best-effort pre-resolution of an {@link IndicesRequest}'s indices against the local
+     * applier state, intended for use inside {@code requiredState} when an action wants to
+     * narrow per-index slice scopes (blocks, index metadata, routing) to the set the
+     * operation will actually touch.
+     * <p>
+     * Returns an empty {@code Optional} if {@code request.indices()} is empty/null or if
+     * resolution throws (stale state, missing indices, etc.) — callers should fall back to
+     * an ALL-scope filter in that case. The system-index-access variant of the resolver is
+     * used so the returned set is a safe superset of what the operation may read.
+     */
+    protected Optional<Set<String>> tryResolveConcreteIndices(IndicesRequest request) {
+        if (request.indices() == null || request.indices().length == 0) {
+            return Optional.empty();
+        }
+        try {
+            String[] resolved = indexNameExpressionResolver.concreteIndexNamesWithSystemIndexAccess(clusterService.state(), request);
+            if (resolved.length == 0) {
+                return Optional.empty();
+            }
+            return Optional.of(new HashSet<>(Arrays.asList(resolved)));
+        } catch (Exception e) {
+            logger.trace("filter pre-resolution failed for [{}]; falling back to ALL-scope", actionName, e);
+            return Optional.empty();
+        }
+    }
 
     @Override
     protected void doExecute(Task task, final Request request, ActionListener<Response> listener) {
@@ -255,11 +333,12 @@ public abstract class TransportClusterManagerNodeAction<Request extends ClusterM
                 if (nodes.isLocalNodeElectedClusterManager() || localExecute(request)) {
                     // check for block, if blocked, retry, else, execute locally
                     if (!checkForBlock(request, clusterState)) {
+                        final ClusterState operationState = stateForOperation(clusterState, request);
                         threadPool.executor(executor)
                             .execute(
                                 ActionRunnable.wrap(
                                     getDelegateForLocalExecute(clusterState),
-                                    l -> clusterManagerOperation(task, request, clusterState, l)
+                                    l -> clusterManagerOperation(task, request, operationState, l)
                                 )
                             );
                     }
@@ -494,9 +573,10 @@ public abstract class TransportClusterManagerNodeAction<Request extends ClusterM
             try {
                 // check for block, if blocked, retry, else, execute locally
                 if (!checkForBlock(request, localClusterState)) {
+                    final ClusterState operationState = stateForOperation(localClusterState, request);
                     Runnable runTask = ActionRunnable.wrap(
                         getDelegateForLocalExecute(localClusterState),
-                        l -> clusterManagerOperation(task, request, localClusterState, l)
+                        l -> clusterManagerOperation(task, request, operationState, l)
                     );
                     threadPool.executor(executor).execute(runTask);
                 }

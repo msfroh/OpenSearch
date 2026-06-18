@@ -42,6 +42,8 @@ import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.metadata.RepositoriesMetadata;
 import org.opensearch.cluster.metadata.RepositoryMetadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.Slices;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.regex.Regex;
 import org.opensearch.core.action.ActionListener;
@@ -97,6 +99,14 @@ public class TransportGetRepositoriesAction extends TransportClusterManagerNodeR
     @Override
     protected ClusterBlockException checkBlock(GetRepositoriesRequest request, ClusterState state) {
         return state.blocks().globalBlockedException(ClusterBlockLevel.METADATA_READ);
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(GetRepositoriesRequest request) {
+        // Reads only the RepositoriesMetadata custom; checkBlock examines global blocks
+        // (on the unfiltered state, but we declare them so the filter accurately reflects
+        // the slices this action touches).
+        return ClusterStateFilter.union(Slices.globalBlocks(), Slices.metadataCustoms(RepositoriesMetadata.TYPE));
     }
 
     @Override

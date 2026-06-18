@@ -44,10 +44,16 @@ import org.opensearch.cluster.ack.ClusterStateUpdateResponse;
 import org.opensearch.cluster.block.ClusterBlockException;
 import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.block.ClusterBlocks;
+import org.opensearch.cluster.metadata.DataStreamMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.MetadataUpdateSettingsService;
 import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.BlockScope;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.IndexMetadataSection;
+import org.opensearch.cluster.service.filter.IndexScope;
+import org.opensearch.cluster.service.filter.Slices;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -56,7 +62,10 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -154,6 +163,34 @@ public class TransportUpdateSettingsAction extends TransportClusterManagerNodeAc
     @Override
     protected AcknowledgedResponse read(StreamInput in) throws IOException {
         return new AcknowledgedResponse(in);
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(UpdateSettingsRequest request) {
+        // The action's pre-task reads are: index resolution (SETTINGS+ALIASES+STATE for
+        // all indices + DataStreamMetadata custom), global+per-index METADATA_WRITE block
+        // checks for the resolved set, and isRemoteSnapshot() on blocked indices (derived
+        // from settings, already in the resolution slice). The actual mutation flows into
+        // MetadataUpdateSettingsService.updateSettings(), whose state-update task is run
+        // by the cluster manager service against the full state — that path is unchanged
+        // by this filter.
+        Optional<Set<String>> resolved = tryResolveConcreteIndices(request);
+        List<ClusterStateFilter> slices = new ArrayList<>();
+        slices.add(
+            Slices.indexMetadata(
+                IndexScope.ALL,
+                IndexMetadataSection.SETTINGS,
+                IndexMetadataSection.ALIASES,
+                IndexMetadataSection.STATE
+            )
+        );
+        slices.add(Slices.metadataCustoms(DataStreamMetadata.TYPE));
+        if (resolved.isPresent()) {
+            slices.add(Slices.blocks(BlockScope.globalAndIndices(resolved.get())));
+        } else {
+            slices.add(Slices.allBlocks());
+        }
+        return ClusterStateFilter.union(slices);
     }
 
     @Override

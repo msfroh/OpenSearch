@@ -409,6 +409,17 @@ public class MetadataIndexTemplateService {
             }
 
             @Override
+            public org.opensearch.cluster.service.filter.ClusterStateFilter requiredState() {
+                // Reads component templates from metadata customs; mutates them. (The
+                // ClusterState.builder(currentState) call below requires the supplier to
+                // return at least a superset of this slice — see
+                // ClusterStateTaskExecutor.requiredState for the contract.)
+                return org.opensearch.cluster.service.filter.Slices.templates(
+                    org.opensearch.cluster.service.filter.TemplateKind.COMPONENT
+                );
+            }
+
+            @Override
             public ClusterState execute(ClusterState currentState) {
                 Set<String> templateNames = new HashSet<>();
                 for (String templateName : currentState.metadata().componentTemplates().keySet()) {

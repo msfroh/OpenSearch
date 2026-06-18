@@ -35,6 +35,7 @@ package org.opensearch.plugins;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.coordination.ElectionStrategy;
 import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.cluster.service.ClusterStatePersistence;
 import org.opensearch.common.network.NetworkService;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.common.transport.TransportAddress;
@@ -43,6 +44,7 @@ import org.opensearch.transport.TransportService;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
@@ -109,5 +111,18 @@ public interface DiscoveryPlugin {
      */
     default Map<String, ElectionStrategy> getElectionStrategies() {
         return Collections.emptyMap();
+    }
+
+    /**
+     * Provides an externalized {@link ClusterStatePersistence} implementation that the
+     * cluster manager will use instead of the default in-memory cluster state supplier
+     * and the standard publication path.
+     * <p>
+     * At most one {@link DiscoveryPlugin} loaded by a node may return a non-empty value
+     * from this method; multiple persistence providers are rejected at startup.
+     * Defaults to {@link Optional#empty()}.
+     */
+    default Optional<ClusterStatePersistence> getClusterStatePersistence() {
+        return Optional.empty();
     }
 }

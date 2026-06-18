@@ -44,6 +44,9 @@ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.MetadataCreateIndexService;
 import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.BlockScope;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.Slices;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -52,6 +55,7 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -98,6 +102,17 @@ public class TransportCreateIndexAction extends TransportClusterManagerNodeActio
     @Override
     protected CreateIndexResponse read(StreamInput in) throws IOException {
         return new CreateIndexResponse(in);
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(CreateIndexRequest request) {
+        // The action reads only ClusterBlocks: global CREATE_INDEX (via
+        // createIndexBlockedException) and the per-index METADATA_WRITE block on
+        // request.index() (which is the unresolved name — resolveDateMathExpression
+        // doesn't consult state). Everything else — template inheritance, settings
+        // validation, name-collision checks, mapping merging — happens in
+        // MetadataCreateIndexService's state-update task against the full state.
+        return Slices.blocks(BlockScope.globalAndIndices(Set.of(request.index())));
     }
 
     @Override

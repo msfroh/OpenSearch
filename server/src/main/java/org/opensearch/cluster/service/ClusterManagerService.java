@@ -170,6 +170,16 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
         this.clusterStateSupplier = clusterStateSupplier;
     }
 
+    /**
+     * Returns the currently registered cluster-state supplier. May be a plain
+     * {@link java.util.function.Supplier} provided by the coordinator's default wiring, or
+     * a filter-aware {@link ClusterStateSupplier} contributed by a discovery plugin.
+     * Callers that want filter-aware fetching should instance-check the return value.
+     */
+    public synchronized java.util.function.Supplier<ClusterState> getClusterStateSupplier() {
+        return clusterStateSupplier;
+    }
+
     @Override
     protected synchronized void doStart() {
         Objects.requireNonNull(clusterStatePublisher, "please set a cluster state publisher before starting");
@@ -252,6 +262,33 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
         return clusterStateSupplier.get();
     }
 
+    /**
+     * Fetches the state that a task batch will execute against. The batch's executor
+     * declares its union {@link org.opensearch.cluster.service.filter.ClusterStateFilter}
+     * via {@link org.opensearch.cluster.ClusterStateTaskExecutor#requiredState(java.util.List)};
+     * if the registered supplier is a {@link ClusterStateSupplier}, that filter is passed
+     * as a prefetching hint. The supplier is contractually allowed (and for safety today,
+     * required) to return at least a superset of the requested slices — typically the
+     * full state — so tasks remain free to use {@code ClusterState.builder(currentState)}.
+     */
+    private ClusterState stateForTask(TaskInputs taskInputs) {
+        java.util.function.Supplier<ClusterState> supplier = clusterStateSupplier;
+        if (supplier instanceof org.opensearch.cluster.service.ClusterStateSupplier filterAware) {
+            org.opensearch.cluster.service.filter.ClusterStateFilter hint;
+            try {
+                List<Object> taskObjects = taskInputs.updateTasks.stream()
+                    .map(task -> (Object) task.getTask())
+                    .collect(Collectors.toList());
+                hint = taskInputs.executor.requiredState(taskObjects);
+            } catch (Exception e) {
+                logger.trace("failed to compute task batch filter; using FULL_STATE hint", e);
+                hint = org.opensearch.cluster.service.filter.ClusterStateFilter.FULL_STATE;
+            }
+            return filterAware.getClusterStateForTask(hint);
+        }
+        return supplier.get();
+    }
+
     private static boolean isClusterManagerUpdateThread() {
         return Thread.currentThread().getName().contains(CLUSTER_MANAGER_UPDATE_THREAD_NAME);
     }
@@ -289,7 +326,7 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
             logger.debug("executing cluster state update for [{}]", summary);
         }
 
-        final ClusterState previousClusterState = state();
+        final ClusterState previousClusterState = stateForTask(taskInputs);
 
         if (!previousClusterState.nodes().isLocalNodeElectedClusterManager() && taskInputs.runOnlyWhenClusterManager()) {
             logger.debug("failing [{}]: local node is no longer cluster-manager", summary);

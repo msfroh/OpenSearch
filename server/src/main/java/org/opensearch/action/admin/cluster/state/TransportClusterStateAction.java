@@ -40,24 +40,39 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ClusterStateObserver;
 import org.opensearch.cluster.NotClusterManagerException;
 import org.opensearch.cluster.block.ClusterBlockException;
+import org.opensearch.cluster.metadata.DataStreamMetadata;
+import org.opensearch.cluster.metadata.IndexGraveyard;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.metadata.Metadata.Custom;
+import org.opensearch.cluster.metadata.RepositoriesMetadata;
+import org.opensearch.cluster.metadata.ViewMetadata;
+import org.opensearch.cluster.metadata.WeightedRoutingMetadata;
 import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.IndexScope;
+import org.opensearch.cluster.service.filter.Slices;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.gateway.remote.RemoteClusterStateService;
+import org.opensearch.ingest.IngestMetadata;
 import org.opensearch.node.NodeClosedException;
+import org.opensearch.persistent.PersistentTasksCustomMetadata;
+import org.opensearch.script.ScriptMetadata;
+import org.opensearch.search.pipeline.SearchPipelineMetadata;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /**
@@ -120,6 +135,51 @@ public class TransportClusterStateAction extends TransportClusterManagerNodeRead
     }
 
     @Override
+    protected ClusterStateFilter requiredState(ClusterStateRequest request) {
+        List<ClusterStateFilter> slices = new ArrayList<>();
+        // Always returned by buildResponse: cluster name + version + stateUUID + clusterUUID + coordinationMetadata.
+        slices.add(Slices.clusterMetadata());
+        slices.add(Slices.allCoordination());
+
+        IndexScope indexScope = request.indices().length == 0 ? IndexScope.ALL : IndexScope.named(Set.of(request.indices()));
+
+        if (request.nodes()) {
+            slices.add(Slices.allNodes());
+        }
+        if (request.routingTable()) {
+            slices.add(Slices.routing(indexScope));
+        }
+        if (request.blocks()) {
+            slices.add(Slices.allBlocks());
+        }
+        if (request.metadata()) {
+            slices.add(Slices.fullIndexMetadata(indexScope));
+            slices.add(Slices.allTemplates());
+            // The response filters metadata customs by XContentContext.API at serialization time;
+            // declare the API-context customs known to the server module so a filter-aware supplier
+            // can materialize them.
+            slices.add(
+                Slices.metadataCustoms(
+                    DataStreamMetadata.TYPE,
+                    ViewMetadata.TYPE,
+                    IngestMetadata.TYPE,
+                    SearchPipelineMetadata.TYPE,
+                    ScriptMetadata.TYPE,
+                    RepositoriesMetadata.TYPE,
+                    WeightedRoutingMetadata.TYPE,
+                    IndexGraveyard.TYPE,
+                    PersistentTasksCustomMetadata.TYPE
+                )
+            );
+        }
+        if (request.customs()) {
+            // Cluster-level ClusterState.Custom values (snapshots / restores / repository cleanup).
+            slices.add(Slices.inProgressAll());
+        }
+        return ClusterStateFilter.union(slices);
+    }
+
+    @Override
     protected void clusterManagerOperation(
         final ClusterStateRequest request,
         final ClusterState state,
@@ -138,6 +198,10 @@ public class TransportClusterStateAction extends TransportClusterManagerNodeRead
                 : acceptableClusterStatePredicate.or(clusterState -> clusterState.nodes().isLocalNodeElectedClusterManager() == false);
 
         if (acceptableClusterStatePredicate.test(state)) {
+            // The base class has already narrowed `state` through requiredState() + the
+            // filter-aware supplier path on the cluster manager. The wait branch below
+            // receives the observer's full state, which buildResponse() narrows via the
+            // request flags as it always has.
             ActionListener.completeWith(listener, () -> buildResponse(request, state));
         } else {
             assert acceptableClusterStateOrNotMasterPredicate.test(state) == false;

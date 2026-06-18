@@ -58,6 +58,7 @@ import org.opensearch.cluster.routing.allocation.AllocationService;
 import org.opensearch.cluster.service.ClusterApplier;
 import org.opensearch.cluster.service.ClusterApplier.ClusterApplyListener;
 import org.opensearch.cluster.service.ClusterManagerService;
+import org.opensearch.cluster.service.ClusterStatePersistence;
 import org.opensearch.cluster.service.ClusterStateStats;
 import org.opensearch.common.Booleans;
 import org.opensearch.common.Nullable;
@@ -197,6 +198,8 @@ public class Coordinator extends AbstractLifecycleComponent implements Discovery
     private final NodeHealthService nodeHealthService;
     private final PersistedStateRegistry persistedStateRegistry;
     private final RemoteClusterStateService remoteClusterStateService;
+    @Nullable
+    private final ClusterStatePersistence clusterStatePersistence;
     private final RemoteStoreNodeService remoteStoreNodeService;
     private NodeConnectionsService nodeConnectionsService;
     private final ClusterSettings clusterSettings;
@@ -226,6 +229,57 @@ public class Coordinator extends AbstractLifecycleComponent implements Discovery
         RemoteStoreNodeService remoteStoreNodeService,
         ClusterManagerMetrics clusterManagerMetrics,
         RemoteClusterStateService remoteClusterStateService
+    ) {
+        this(
+            nodeName,
+            settings,
+            clusterSettings,
+            transportService,
+            namedWriteableRegistry,
+            allocationService,
+            clusterManagerService,
+            persistedStateSupplier,
+            seedHostsProvider,
+            clusterApplier,
+            onJoinValidators,
+            random,
+            rerouteService,
+            electionStrategy,
+            nodeHealthService,
+            persistedStateRegistry,
+            remoteStoreNodeService,
+            clusterManagerMetrics,
+            remoteClusterStateService,
+            Optional.empty()
+        );
+    }
+
+    /**
+     * @param nodeName The name of the node, used to name the {@link java.util.concurrent.ExecutorService} of the {@link SeedHostsResolver}.
+     * @param onJoinValidators A collection of join validators to restrict which nodes may join the cluster.
+     * @param clusterStatePersistence Optional pluggable persistence; when present its supplier and publisher override the defaults.
+     */
+    public Coordinator(
+        String nodeName,
+        Settings settings,
+        ClusterSettings clusterSettings,
+        TransportService transportService,
+        NamedWriteableRegistry namedWriteableRegistry,
+        AllocationService allocationService,
+        ClusterManagerService clusterManagerService,
+        Supplier<CoordinationState.PersistedState> persistedStateSupplier,
+        SeedHostsProvider seedHostsProvider,
+        ClusterApplier clusterApplier,
+        Collection<BiConsumer<DiscoveryNode, ClusterState>> onJoinValidators,
+        Random random,
+        RerouteService rerouteService,
+        ElectionStrategy electionStrategy,
+        NodeHealthService nodeHealthService,
+        PersistedStateRegistry persistedStateRegistry,
+        RemoteStoreNodeService remoteStoreNodeService,
+        ClusterManagerMetrics clusterManagerMetrics,
+        RemoteClusterStateService remoteClusterStateService,
+        Optional<ClusterStatePersistence> clusterStatePersistence
     ) {
         this.settings = settings;
         this.transportService = transportService;
@@ -301,7 +355,12 @@ public class Coordinator extends AbstractLifecycleComponent implements Discovery
         );
         this.nodeRemovalExecutor = new NodeRemovalClusterStateTaskExecutor(allocationService, logger);
         this.clusterApplier = clusterApplier;
-        clusterManagerService.setClusterStateSupplier(this::getStateForClusterManagerService);
+        this.clusterStatePersistence = clusterStatePersistence.orElse(null);
+        if (this.clusterStatePersistence != null) {
+            clusterManagerService.setClusterStateSupplier(this.clusterStatePersistence.getClusterStateSupplier());
+        } else {
+            clusterManagerService.setClusterStateSupplier(this::getStateForClusterManagerService);
+        }
         this.reconfigurator = new Reconfigurator(settings, clusterSettings);
         this.clusterBootstrapService = new ClusterBootstrapService(
             settings,
@@ -1352,6 +1411,10 @@ public class Coordinator extends AbstractLifecycleComponent implements Discovery
         ActionListener<Void> publishListener,
         ClusterStatePublisher.AckListener ackListener
     ) {
+        if (clusterStatePersistence != null) {
+            clusterStatePersistence.getClusterStatePublisher().publish(clusterChangedEvent, publishListener, ackListener);
+            return;
+        }
         try {
             synchronized (mutex) {
                 if (mode != Mode.LEADER || getCurrentTerm() != clusterChangedEvent.state().term()) {

@@ -41,6 +41,9 @@ import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.ComponentTemplate;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.Slices;
+import org.opensearch.cluster.service.filter.TemplateKind;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.regex.Regex;
 import org.opensearch.core.action.ActionListener;
@@ -94,6 +97,11 @@ public class TransportGetComponentTemplateAction extends TransportClusterManager
     @Override
     protected ClusterBlockException checkBlock(GetComponentTemplateAction.Request request, ClusterState state) {
         return state.blocks().globalBlockedException(ClusterBlockLevel.METADATA_READ);
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(GetComponentTemplateAction.Request request) {
+        return ClusterStateFilter.union(Slices.globalBlocks(), Slices.templates(TemplateKind.COMPONENT));
     }
 
     @Override

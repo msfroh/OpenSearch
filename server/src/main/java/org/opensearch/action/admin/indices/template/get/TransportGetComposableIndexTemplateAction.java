@@ -41,6 +41,9 @@ import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.ComposableIndexTemplate;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.Slices;
+import org.opensearch.cluster.service.filter.TemplateKind;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.regex.Regex;
 import org.opensearch.core.action.ActionListener;
@@ -94,6 +97,11 @@ public class TransportGetComposableIndexTemplateAction extends TransportClusterM
     @Override
     protected ClusterBlockException checkBlock(GetComposableIndexTemplateAction.Request request, ClusterState state) {
         return state.blocks().globalBlockedException(ClusterBlockLevel.METADATA_READ);
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(GetComposableIndexTemplateAction.Request request) {
+        return ClusterStateFilter.union(Slices.globalBlocks(), Slices.templates(TemplateKind.COMPOSABLE));
     }
 
     @Override

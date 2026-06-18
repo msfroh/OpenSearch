@@ -32,6 +32,7 @@
 package org.opensearch.cluster;
 
 import org.opensearch.cluster.service.ClusterManagerTaskThrottler;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
 
@@ -51,6 +52,21 @@ public interface ClusterStateTaskExecutor<T> {
      * should be changed.
      */
     ClusterTasksResult<T> execute(ClusterState currentState, List<T> tasks) throws Exception;
+
+    /**
+     * Declares the slice of {@link ClusterState} this batch of tasks reads. The
+     * {@link org.opensearch.cluster.service.ClusterStateSupplier} may use the union of
+     * declared task and read filters as a prefetching hint, but the state passed to
+     * {@link #execute(ClusterState, List)} must remain safe to build upon — i.e., the
+     * supplier returns at least a superset of the requested slices, typically the full
+     * state — because tasks construct their result via
+     * {@code ClusterState.builder(currentState)} and any slice missing from the input
+     * would be erased on publication. Defaults to {@link ClusterStateFilter#FULL_STATE}
+     * to preserve historical behaviour for unmigrated tasks.
+     */
+    default ClusterStateFilter requiredState(List<T> tasks) {
+        return ClusterStateFilter.FULL_STATE;
+    }
 
     /**
      * indicates whether this executor should only run if the current node is cluster-manager

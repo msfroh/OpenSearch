@@ -44,6 +44,7 @@ import org.opensearch.cluster.routing.RerouteService;
 import org.opensearch.cluster.routing.allocation.AllocationService;
 import org.opensearch.cluster.service.ClusterApplier;
 import org.opensearch.cluster.service.ClusterManagerService;
+import org.opensearch.cluster.service.ClusterStatePersistence;
 import org.opensearch.common.Randomness;
 import org.opensearch.common.network.NetworkService;
 import org.opensearch.common.settings.ClusterSettings;
@@ -68,6 +69,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.BiConsumer;
@@ -145,6 +147,8 @@ public class DiscoveryModule {
         hostProviders.put("file", () -> new FileBasedSeedHostsProvider(configFile));
         final Map<String, ElectionStrategy> electionStrategies = new HashMap<>();
         electionStrategies.put(DEFAULT_ELECTION_STRATEGY, ElectionStrategy.DEFAULT_INSTANCE);
+        Optional<ClusterStatePersistence> clusterStatePersistence = Optional.empty();
+        DiscoveryPlugin persistenceProvider = null;
         for (DiscoveryPlugin plugin : plugins) {
             plugin.getSeedHostProviders(transportService, networkService).forEach((key, value) -> {
                 if (hostProviders.put(key, value) != null) {
@@ -160,6 +164,20 @@ public class DiscoveryModule {
                     throw new IllegalArgumentException("Cannot register election strategy [" + key + "] twice");
                 }
             });
+            Optional<ClusterStatePersistence> fromPlugin = plugin.getClusterStatePersistence();
+            if (fromPlugin.isPresent()) {
+                if (clusterStatePersistence.isPresent()) {
+                    throw new IllegalArgumentException(
+                        "Multiple plugins ["
+                            + persistenceProvider.getClass().getName()
+                            + ", "
+                            + plugin.getClass().getName()
+                            + "] provided a ClusterStatePersistence; at most one is allowed"
+                    );
+                }
+                clusterStatePersistence = fromPlugin;
+                persistenceProvider = plugin;
+            }
         }
 
         List<String> seedProviderNames = getSeedProviderNames(settings);
@@ -217,7 +235,8 @@ public class DiscoveryModule {
                 persistedStateRegistry,
                 remoteStoreNodeService,
                 clusterManagerMetrics,
-                remoteClusterStateService
+                remoteClusterStateService,
+                clusterStatePersistence
             );
         } else {
             throw new IllegalArgumentException("Unknown discovery type [" + discoveryType + "]");

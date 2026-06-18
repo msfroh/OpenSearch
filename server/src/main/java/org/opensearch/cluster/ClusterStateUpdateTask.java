@@ -32,12 +32,14 @@
 
 package org.opensearch.cluster;
 
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.Priority;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.unit.TimeValue;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * A task that can update the cluster state.
@@ -78,6 +80,30 @@ public abstract class ClusterStateUpdateTask
      * should be changed.
      */
     public abstract ClusterState execute(ClusterState currentState) throws Exception;
+
+    /**
+     * Declares the slice of {@link ClusterState} this single task reads. The default
+     * {@link ClusterStateFilter#FULL_STATE} preserves historical behaviour; tasks that
+     * touch only a known subset (e.g., a per-index slice, just templates, etc.) should
+     * override to enable filter-aware suppliers to prefetch the right slices. See
+     * {@link ClusterStateTaskExecutor#requiredState(List)} for the contract — the supplier
+     * is permitted to return the full state, so overrides are safe regardless of how the
+     * supplier interprets the hint.
+     */
+    public ClusterStateFilter requiredState() {
+        return ClusterStateFilter.FULL_STATE;
+    }
+
+    @Override
+    public final ClusterStateFilter requiredState(List<ClusterStateUpdateTask> tasks) {
+        if (tasks.isEmpty()) {
+            return ClusterStateFilter.FULL_STATE;
+        }
+        if (tasks.size() == 1) {
+            return tasks.get(0).requiredState();
+        }
+        return ClusterStateFilter.union(tasks.stream().map(ClusterStateUpdateTask::requiredState).collect(Collectors.toList()));
+    }
 
     /**
      * A callback called when execute fails.

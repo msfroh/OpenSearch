@@ -37,9 +37,15 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.clustermanager.info.TransportClusterInfoAction;
 import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.DataStreamMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.cluster.service.filter.BlockScope;
+import org.opensearch.cluster.service.filter.ClusterStateFilter;
+import org.opensearch.cluster.service.filter.IndexMetadataSection;
+import org.opensearch.cluster.service.filter.IndexScope;
+import org.opensearch.cluster.service.filter.Slices;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -48,7 +54,11 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 /**
  * Transport action to get field mappings.
@@ -85,6 +95,35 @@ public class TransportGetMappingsAction extends TransportClusterInfoAction<GetMa
     @Override
     protected GetMappingsResponse read(StreamInput in) throws IOException {
         return new GetMappingsResponse(in);
+    }
+
+    @Override
+    protected ClusterStateFilter requiredState(GetMappingsRequest request) {
+        // Index resolution always needs the full SETTINGS+ALIASES+STATE lookup across all
+        // indices (plus the DataStreamMetadata custom). When the request's indices resolve
+        // cleanly against the local applier state we narrow two slices to the resolved
+        // set: the per-index METADATA_READ block check and per-index MAPPINGS (the actual
+        // response payload). The resolution is best-effort — if it throws, we fall back
+        // to an ALL-scope filter which is correct but coarser.
+        Optional<Set<String>> resolved = tryResolveConcreteIndices(request);
+        List<ClusterStateFilter> slices = new ArrayList<>();
+        slices.add(
+            Slices.indexMetadata(
+                IndexScope.ALL,
+                IndexMetadataSection.SETTINGS,
+                IndexMetadataSection.ALIASES,
+                IndexMetadataSection.STATE
+            )
+        );
+        slices.add(Slices.metadataCustoms(DataStreamMetadata.TYPE));
+        if (resolved.isPresent()) {
+            slices.add(Slices.blocks(BlockScope.indices(resolved.get())));
+            slices.add(Slices.indexMetadata(IndexScope.named(resolved.get()), IndexMetadataSection.MAPPINGS));
+        } else {
+            slices.add(Slices.allBlocks());
+            slices.add(Slices.indexMetadata(IndexScope.ALL, IndexMetadataSection.MAPPINGS));
+        }
+        return ClusterStateFilter.union(slices);
     }
 
     @Override
