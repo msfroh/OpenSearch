@@ -56,6 +56,7 @@ import org.opensearch.common.regex.Regex;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.CachedSupplier;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -91,6 +92,7 @@ import java.util.Spliterators;
 import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -260,15 +262,15 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     private final boolean clusterUUIDCommitted;
     private final long version;
 
-    private final CoordinationMetadata coordinationMetadata;
+    private final CachedSupplier<CoordinationMetadata> coordinationMetadataSupplier;
 
-    private final Settings transientSettings;
-    private final Settings persistentSettings;
-    private final Settings settings;
-    private final DiffableStringMap hashesOfConsistentSettings;
+    private final CachedSupplier<Settings> transientSettingsSupplier;
+    private final CachedSupplier<Settings> persistentSettingsSupplier;
+    private final CachedSupplier<Settings> settingsSupplier;
+    private final CachedSupplier<DiffableStringMap> hashesOfConsistentSettingsSupplier;
     private final Map<String, IndexMetadata> indices;
-    private final TemplatesMetadata templates;
-    private final Map<String, Custom> customs;
+    private final CachedSupplier<TemplatesMetadata> templatesSupplier;
+    private final CachedSupplier<Map<String, Custom>> customsSupplier;
 
     private final transient int totalNumberOfShards; // Transient ? not serializable anyway?
     private final int totalOpenLocalOnlyIndexShards;
@@ -305,17 +307,75 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         SortedMap<String, IndexAbstraction> indicesLookup,
         Map<String, SortedMap<Long, String>> systemTemplatesLookup
     ) {
+        this(
+            clusterUUID,
+            clusterUUIDCommitted,
+            version,
+            () -> coordinationMetadata,
+            () -> transientSettings,
+            () -> persistentSettings,
+            () -> hashesOfConsistentSettings,
+            indices,
+            () -> new TemplatesMetadata(templates),
+            () -> Collections.unmodifiableMap(customs),
+            allIndices,
+            visibleIndices,
+            allOpenIndices,
+            visibleOpenIndices,
+            allClosedIndices,
+            visibleClosedIndices,
+            indicesLookup,
+            systemTemplatesLookup
+        );
+    }
+
+    /**
+     * Lazy-friendly constructor. The supplier-typed components are materialized on first
+     * access via {@link CachedSupplier}. Intended for suppliers (e.g., file-backed) that can
+     * stream components from disk; eager callers should use the public {@link Builder} which
+     * routes through the eager constructor above.
+     * <p>
+     * {@code indices} is still passed eagerly here; per-index laziness arrives in a follow-up
+     * change that introduces a per-key supplier map. The derived fields (totalNumberOfShards,
+     * the index-name arrays, indicesLookup, systemTemplatesLookup) are likewise pre-computed
+     * by the {@link Builder} today and remain eager until that change.
+     */
+    Metadata(
+        String clusterUUID,
+        boolean clusterUUIDCommitted,
+        long version,
+        Supplier<CoordinationMetadata> coordinationMetadataSupplier,
+        Supplier<Settings> transientSettingsSupplier,
+        Supplier<Settings> persistentSettingsSupplier,
+        Supplier<DiffableStringMap> hashesOfConsistentSettingsSupplier,
+        final Map<String, IndexMetadata> indices,
+        Supplier<TemplatesMetadata> templatesSupplier,
+        Supplier<Map<String, Custom>> customsSupplier,
+        String[] allIndices,
+        String[] visibleIndices,
+        String[] allOpenIndices,
+        String[] visibleOpenIndices,
+        String[] allClosedIndices,
+        String[] visibleClosedIndices,
+        SortedMap<String, IndexAbstraction> indicesLookup,
+        Map<String, SortedMap<Long, String>> systemTemplatesLookup
+    ) {
         this.clusterUUID = clusterUUID;
         this.clusterUUIDCommitted = clusterUUIDCommitted;
         this.version = version;
-        this.coordinationMetadata = coordinationMetadata;
-        this.transientSettings = transientSettings;
-        this.persistentSettings = persistentSettings;
-        this.settings = Settings.builder().put(persistentSettings).put(transientSettings).build();
-        this.hashesOfConsistentSettings = hashesOfConsistentSettings;
+        this.coordinationMetadataSupplier = asCached(coordinationMetadataSupplier);
+        this.transientSettingsSupplier = asCached(transientSettingsSupplier);
+        this.persistentSettingsSupplier = asCached(persistentSettingsSupplier);
+        // The merged settings view is also lazy: only computed if someone calls settings().
+        // The supplier captures the supplier references above, so it works whether their
+        // backing values are eager or lazy.
+        this.settingsSupplier = new CachedSupplier<>(
+            () -> Settings.builder().put(this.persistentSettingsSupplier.get()).put(this.transientSettingsSupplier.get()).build()
+        );
+        this.hashesOfConsistentSettingsSupplier = asCached(hashesOfConsistentSettingsSupplier);
         this.indices = Collections.unmodifiableMap(indices);
-        this.customs = Collections.unmodifiableMap(customs);
-        this.templates = new TemplatesMetadata(templates);
+        this.templatesSupplier = asCached(templatesSupplier);
+        this.customsSupplier = asCached(customsSupplier);
         int totalNumberOfShards = 0;
         int totalOpenLocalOnlyIndexShards = 0;
         int totalOpenRemoteCapableIndexShards = 0;
@@ -343,6 +403,10 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         this.systemTemplatesLookup = systemTemplatesLookup;
     }
 
+    private static <T> CachedSupplier<T> asCached(Supplier<T> supplier) {
+        return supplier instanceof CachedSupplier<T> cached ? cached : new CachedSupplier<>(supplier);
+    }
+
     public long version() {
         return this.version;
     }
@@ -363,23 +427,23 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
      * Returns the merged transient and persistent settings.
      */
     public Settings settings() {
-        return this.settings;
+        return settingsSupplier.get();
     }
 
     public Settings transientSettings() {
-        return this.transientSettings;
+        return transientSettingsSupplier.get();
     }
 
     public Settings persistentSettings() {
-        return this.persistentSettings;
+        return persistentSettingsSupplier.get();
     }
 
     public Map<String, String> hashesOfConsistentSettings() {
-        return this.hashesOfConsistentSettings;
+        return hashesOfConsistentSettingsSupplier.get();
     }
 
     public CoordinationMetadata coordinationMetadata() {
-        return this.coordinationMetadata;
+        return coordinationMetadataSupplier.get();
     }
 
     public boolean hasAlias(String alias) {
@@ -824,7 +888,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public Map<String, IndexTemplateMetadata> templates() {
-        return this.templates.getTemplates();
+        return templatesSupplier.get().getTemplates();
     }
 
     public Map<String, IndexTemplateMetadata> getTemplates() {
@@ -832,7 +896,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public TemplatesMetadata templatesMetadata() {
-        return this.templates;
+        return templatesSupplier.get();
     }
 
     public Map<String, ComponentTemplate> componentTemplates() {
@@ -872,7 +936,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public Map<String, Custom> customs() {
-        return this.customs;
+        return customsSupplier.get();
     }
 
     public Map<String, Custom> getCustoms() {
@@ -895,7 +959,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public <T extends Custom> T custom(String type) {
-        return (T) customs.get(type);
+        return (T) customs().get(type);
     }
 
     /**
@@ -971,7 +1035,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         if (!isCoordinationMetadataEqual(metadata1, metadata2)) {
             return false;
         }
-        if (!metadata1.hashesOfConsistentSettings.equals(metadata2.hashesOfConsistentSettings)) {
+        if (!metadata1.hashesOfConsistentSettings().equals(metadata2.hashesOfConsistentSettings())) {
             return false;
         }
         if (!metadata1.clusterUUID.equals(metadata2.clusterUUID)) {
@@ -998,35 +1062,35 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public static boolean isCoordinationMetadataEqual(Metadata metadata1, Metadata metadata2) {
-        return metadata1.coordinationMetadata.equals(metadata2.coordinationMetadata);
+        return metadata1.coordinationMetadata().equals(metadata2.coordinationMetadata());
     }
 
     public static boolean isSettingsMetadataEqual(Metadata metadata1, Metadata metadata2) {
-        return metadata1.persistentSettings.equals(metadata2.persistentSettings);
+        return metadata1.persistentSettings().equals(metadata2.persistentSettings());
     }
 
     public static boolean isTransientSettingsMetadataEqual(Metadata metadata1, Metadata metadata2) {
-        return metadata1.transientSettings.equals(metadata2.transientSettings);
+        return metadata1.transientSettings().equals(metadata2.transientSettings());
     }
 
     public static boolean isTemplatesMetadataEqual(Metadata metadata1, Metadata metadata2) {
-        return metadata1.templates.equals(metadata2.templates);
+        return metadata1.templatesMetadata().equals(metadata2.templatesMetadata());
     }
 
     public static boolean isHashesOfConsistentSettingsEqual(Metadata metadata1, Metadata metadata2) {
-        return metadata1.hashesOfConsistentSettings.equals(metadata2.hashesOfConsistentSettings);
+        return metadata1.hashesOfConsistentSettings().equals(metadata2.hashesOfConsistentSettings());
     }
 
     public static boolean isCustomMetadataEqual(Metadata metadata1, Metadata metadata2) {
         int customCount1 = 0;
-        for (Map.Entry<String, Custom> cursor : metadata1.customs.entrySet()) {
+        for (Map.Entry<String, Custom> cursor : metadata1.customs().entrySet()) {
             if (cursor.getValue().context().contains(XContentContext.GATEWAY)) {
                 if (!cursor.getValue().equals(metadata2.custom(cursor.getKey()))) return false;
                 customCount1++;
             }
         }
         int customCount2 = 0;
-        for (final Custom cursor : metadata2.customs.values()) {
+        for (final Custom cursor : metadata2.customs().values()) {
             if (cursor.context().contains(XContentContext.GATEWAY)) {
                 customCount2++;
             }
@@ -1075,17 +1139,23 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             clusterUUID = after.clusterUUID;
             clusterUUIDCommitted = after.clusterUUIDCommitted;
             version = after.version;
-            coordinationMetadata = after.coordinationMetadata;
-            transientSettings = after.transientSettings;
-            persistentSettings = after.persistentSettings;
-            hashesOfConsistentSettings = after.hashesOfConsistentSettings.diff(before.hashesOfConsistentSettings);
+            coordinationMetadata = after.coordinationMetadata();
+            transientSettings = after.transientSettings();
+            persistentSettings = after.persistentSettings();
+            hashesOfConsistentSettings = after.hashesOfConsistentSettingsSupplier.get()
+                .diff(before.hashesOfConsistentSettingsSupplier.get());
             indices = DiffableUtils.diff(before.indices, after.indices, DiffableUtils.getStringKeySerializer());
             templates = DiffableUtils.diff(
-                before.templates.getTemplates(),
-                after.templates.getTemplates(),
+                before.templatesSupplier.get().getTemplates(),
+                after.templatesSupplier.get().getTemplates(),
                 DiffableUtils.getStringKeySerializer()
             );
-            customs = DiffableUtils.diff(before.customs, after.customs, DiffableUtils.getStringKeySerializer(), CUSTOM_VALUE_SERIALIZER);
+            customs = DiffableUtils.diff(
+                before.customs(),
+                after.customs(),
+                DiffableUtils.getStringKeySerializer(),
+                CUSTOM_VALUE_SERIALIZER
+            );
         }
 
         private static final DiffableUtils.DiffableValueReader<String, IndexMetadata> INDEX_METADATA_DIFF_VALUE_READER =
@@ -1129,10 +1199,10 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             builder.coordinationMetadata(coordinationMetadata);
             builder.transientSettings(transientSettings);
             builder.persistentSettings(persistentSettings);
-            builder.hashesOfConsistentSettings(hashesOfConsistentSettings.apply(part.hashesOfConsistentSettings));
+            builder.hashesOfConsistentSettings(hashesOfConsistentSettings.apply(part.hashesOfConsistentSettingsSupplier.get()));
             builder.indices(indices.apply(part.indices));
-            builder.templates(templates.apply(part.templates.getTemplates()));
-            builder.customs(customs.apply(part.customs));
+            builder.templates(templates.apply(part.templatesSupplier.get().getTemplates()));
+            builder.customs(customs.apply(part.customs()));
             return builder.build();
         }
     }
@@ -1164,18 +1234,19 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
+        Map<String, Custom> customs = customs();
         out.writeLong(version);
         out.writeString(clusterUUID);
         out.writeBoolean(clusterUUIDCommitted);
-        coordinationMetadata.writeTo(out);
-        writeSettingsToStream(transientSettings, out);
-        writeSettingsToStream(persistentSettings, out);
-        hashesOfConsistentSettings.writeTo(out);
+        coordinationMetadata().writeTo(out);
+        writeSettingsToStream(transientSettings(), out);
+        writeSettingsToStream(persistentSettings(), out);
+        hashesOfConsistentSettingsSupplier.get().writeTo(out);
         out.writeVInt(indices.size());
         for (IndexMetadata indexMetadata : this) {
             indexMetadata.writeTo(out);
         }
-        templates.writeTo(out);
+        templatesSupplier.get().writeTo(out);
         // filter out custom states not supported by the other node
         int numberOfCustoms = 0;
         for (final Custom cursor : customs.values()) {
@@ -1235,14 +1306,14 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         public Builder(Metadata metadata) {
             this.clusterUUID = metadata.clusterUUID;
             this.clusterUUIDCommitted = metadata.clusterUUIDCommitted;
-            this.coordinationMetadata = metadata.coordinationMetadata;
-            this.transientSettings = metadata.transientSettings;
-            this.persistentSettings = metadata.persistentSettings;
-            this.hashesOfConsistentSettings = metadata.hashesOfConsistentSettings;
+            this.coordinationMetadata = metadata.coordinationMetadata();
+            this.transientSettings = metadata.transientSettings();
+            this.persistentSettings = metadata.persistentSettings();
+            this.hashesOfConsistentSettings = metadata.hashesOfConsistentSettingsSupplier.get();
             this.version = metadata.version;
             this.indices = new HashMap<>(metadata.indices);
-            this.templates = new HashMap<>(metadata.templates.getTemplates());
-            this.customs = new HashMap<>(metadata.customs);
+            this.templates = new HashMap<>(metadata.templatesMetadata().getTemplates());
+            this.customs = new HashMap<>(metadata.customs());
             this.previousMetadata = metadata;
         }
 
@@ -1610,7 +1681,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         public Metadata build() {
             DataStreamMetadata dataStreamMetadata = (DataStreamMetadata) this.customs.get(DataStreamMetadata.TYPE);
             DataStreamMetadata previousDataStreamMetadata = (previousMetadata != null)
-                ? (DataStreamMetadata) this.previousMetadata.customs.get(DataStreamMetadata.TYPE)
+                ? (DataStreamMetadata) this.previousMetadata.customs().get(DataStreamMetadata.TYPE)
                 : null;
 
             buildSystemTemplatesLookup();
@@ -1628,7 +1699,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         private void buildSystemTemplatesLookup() {
             if (previousMetadata != null
                 && Objects.equals(
-                    previousMetadata.customs.get(ComponentTemplateMetadata.TYPE),
+                    previousMetadata.customs().get(ComponentTemplateMetadata.TYPE),
                     this.customs.get(ComponentTemplateMetadata.TYPE)
                 )) {
                 systemTemplatesLookup = Collections.unmodifiableMap(previousMetadata.systemTemplatesLookup);
