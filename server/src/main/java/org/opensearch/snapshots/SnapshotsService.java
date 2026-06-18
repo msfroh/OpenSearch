@@ -2440,6 +2440,17 @@ public class SnapshotsService extends AbstractLifecycleComponent implements Clus
         clusterService.submitStateUpdateTask("remove snapshot metadata", new ClusterStateUpdateTask() {
 
             @Override
+            public org.opensearch.cluster.service.filter.ClusterStateFilter requiredState() {
+                // This task only reads/writes the SnapshotsInProgress and SnapshotDeletionsInProgress
+                // cluster-state customs (via stateWithoutSnapshot → readyDeletions →
+                // updateWithSnapshots), so a filter-aware supplier only needs to prefetch those two.
+                return org.opensearch.cluster.service.filter.Slices.inProgress(
+                    org.opensearch.cluster.service.filter.InProgressType.SNAPSHOTS,
+                    org.opensearch.cluster.service.filter.InProgressType.SNAPSHOT_DELETIONS
+                );
+            }
+
+            @Override
             public ClusterState execute(ClusterState currentState) {
                 final ClusterState updatedState = stateWithoutSnapshot(currentState, snapshot);
                 // now check if there are any delete operations that refer to the just failed snapshot and remove the snapshot from them
