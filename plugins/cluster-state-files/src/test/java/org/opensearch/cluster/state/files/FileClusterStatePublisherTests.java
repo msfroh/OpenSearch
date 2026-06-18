@@ -125,18 +125,16 @@ public class FileClusterStatePublisherTests extends OpenSearchTestCase {
             onlyAdded.getFileName().toString().startsWith("foo-uuid-")
         );
 
-        // bar's filename is reused, foo's is not.
-        String fooUuid = second.metadata().index("foo").getIndexUUID();
-        String barUuid = first.metadata().index("bar").getIndexUUID();
+        // bar's filename is reused, foo's is not. Manifest indices map is keyed by name.
         assertNotEquals(
             "foo's filename should have changed",
-            firstManifest.indices().get(fooUuid),
-            secondManifest.indices().get(fooUuid)
+            firstManifest.indices().get("foo"),
+            secondManifest.indices().get("foo")
         );
         assertEquals(
             "bar's filename should be reused",
-            firstManifest.indices().get(barUuid),
-            secondManifest.indices().get(barUuid)
+            firstManifest.indices().get("bar"),
+            secondManifest.indices().get("bar")
         );
 
         // Routing/blocks/nodes/coordination filenames all reused (reference-equal).

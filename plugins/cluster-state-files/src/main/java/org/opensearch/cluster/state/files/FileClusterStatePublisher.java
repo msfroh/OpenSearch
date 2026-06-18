@@ -182,19 +182,20 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
 
         // ---- Per-index ----
         for (IndexMetadata idx : metadata.indices().values()) {
+            String name = idx.getIndex().getName();
             String uuid = idx.getIndexUUID();
-            IndexMetadata prior = priorMetadata == null ? null : indexByUuid(priorMetadata, uuid);
+            IndexMetadata prior = priorMetadata == null ? null : priorMetadata.indices().get(name);
             boolean reuse = prior != null && prior == idx;
-            String reusedName = reuse ? lastPublishedManifest.indices().get(uuid) : null;
+            String reusedName = reuse ? lastPublishedManifest.indices().get(name) : null;
             byte[] bytes = reuse ? null : ComponentCodec.writeIndex(idx);
-            String name = writePerKey(
+            String fileName = writePerKey(
                 componentsDir,
                 COMPONENTS_INDICES_DIR,
                 reusedName,
                 bytes,
                 sha -> FileClusterStateLayout.indexComponentFileName(uuid, sha)
             );
-            indices.put(uuid, name);
+            indices.put(name, fileName);
         }
 
         // ---- State customs ----
@@ -237,6 +238,8 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
             state.version(),
             state.stateUUID(),
             metadata.clusterUUID(),
+            metadata.clusterUUIDCommitted(),
+            metadata.version(),
             state.getClusterName().value(),
             components,
             indices,
@@ -324,15 +327,6 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
             && a.persistentSettings().equals(b.persistentSettings())
             && a.hashesOfConsistentSettings().equals(b.hashesOfConsistentSettings())
             && a.templates().equals(b.templates());
-    }
-
-    private static IndexMetadata indexByUuid(Metadata metadata, String uuid) {
-        for (IndexMetadata idx : metadata.indices().values()) {
-            if (uuid.equals(idx.getIndexUUID())) {
-                return idx;
-            }
-        }
-        return null;
     }
 
     private static void writeAtomic(Path file, byte[] bytes) throws IOException {

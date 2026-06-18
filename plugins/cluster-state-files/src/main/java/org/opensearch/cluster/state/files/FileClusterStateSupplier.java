@@ -15,7 +15,10 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ClusterStateLazyComposer;
 import org.opensearch.cluster.block.ClusterBlocks;
 import org.opensearch.cluster.coordination.CoordinationMetadata;
+import org.opensearch.cluster.metadata.LazyIndices;
 import org.opensearch.cluster.metadata.Metadata;
+import org.opensearch.cluster.metadata.MetadataLazyComposer;
+import org.opensearch.cluster.metadata.TemplatesMetadata;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.routing.RoutingTable;
@@ -31,7 +34,9 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.opensearch.cluster.state.files.FileClusterStateLayout.COMPONENTS_DIR;
 import static org.opensearch.cluster.state.files.FileClusterStateLayout.CURRENT_MANIFEST;
@@ -179,38 +184,84 @@ public final class FileClusterStateSupplier implements ClusterStateSupplier {
     }
 
     private static Metadata buildMetadata(Path componentsDir, ComponentManifest manifest, NamedWriteableRegistry registry) {
-        try {
-            Metadata.Builder mdBuilder = Metadata.builder().clusterUUID(manifest.clusterUuid());
+        // The header file contains version + settings + hashes + templates — all the small
+        // scalar/map fields that aren't broken out into their own component file. Each
+        // top-level slot is its own supplier so it only opens its file on first access.
 
-            ComponentCodec.MetadataHeader header = ComponentCodec.readMetadataHeader(
-                componentsDir.resolve(requiredComponent(manifest, SLOT_METADATA))
-            );
-            mdBuilder.version(header.version())
-                .clusterUUID(header.clusterUUID())
-                .clusterUUIDCommitted(header.clusterUUIDCommitted())
-                .transientSettings(header.transientSettings())
-                .persistentSettings(header.persistentSettings())
-                .hashesOfConsistentSettings(header.hashesOfConsistentSettings())
-                .templates(header.templates());
-
-            String coordName = manifest.components().get(SLOT_COORDINATION);
-            if (coordName != null) {
-                CoordinationMetadata coord = ComponentCodec.readCoordination(componentsDir.resolve(coordName));
-                mdBuilder.coordinationMetadata(coord);
+        Supplier<ComponentCodec.MetadataHeader> headerSupplier = memoize(() -> {
+            try {
+                return ComponentCodec.readMetadataHeader(
+                    componentsDir.resolve(requiredComponent(manifest, SLOT_METADATA))
+                );
+            } catch (IOException e) {
+                throw new UncheckedIOException("failed to read metadata header", e);
             }
+        });
 
-            for (Map.Entry<String, String> e : manifest.indices().entrySet()) {
-                mdBuilder.put(ComponentCodec.readIndex(componentsDir.resolve(e.getValue())), false);
+        Supplier<CoordinationMetadata> coordSupplier = () -> {
+            String name = manifest.components().get(SLOT_COORDINATION);
+            if (name == null) {
+                return CoordinationMetadata.EMPTY_METADATA;
             }
-
-            for (Map.Entry<String, String> e : manifest.metadataCustoms().entrySet()) {
-                mdBuilder.putCustom(e.getKey(), ComponentCodec.readMetadataCustom(componentsDir.resolve(e.getValue()), registry));
+            try {
+                return ComponentCodec.readCoordination(componentsDir.resolve(name));
+            } catch (IOException e) {
+                throw new UncheckedIOException("failed to read coordination metadata", e);
             }
+        };
 
-            return mdBuilder.build();
-        } catch (IOException e) {
-            throw new UncheckedIOException("failed to materialize Metadata from " + componentsDir, e);
+        // Per-index lazy entries: the LazyIndices holds the keys (so size()/keySet() are
+        // free) but each value supplier opens its file only when index(name) — or a bulk
+        // accessor — requests it.
+        Map<String, Supplier<org.opensearch.cluster.metadata.IndexMetadata>> lazyIndexEntries = new LinkedHashMap<>(
+            manifest.indices().size()
+        );
+        for (Map.Entry<String, String> e : manifest.indices().entrySet()) {
+            String fileName = e.getValue();
+            lazyIndexEntries.put(e.getKey(), () -> {
+                try {
+                    return ComponentCodec.readIndex(componentsDir.resolve(fileName));
+                } catch (IOException ex) {
+                    throw new UncheckedIOException("failed to read index file " + fileName, ex);
+                }
+            });
         }
+        LazyIndices lazyIndices = LazyIndices.ofLazy(lazyIndexEntries);
+
+        Supplier<Map<String, Metadata.Custom>> customsSupplier = () -> {
+            if (manifest.metadataCustoms().isEmpty()) {
+                return Map.of();
+            }
+            try {
+                Map<String, Metadata.Custom> out = new HashMap<>(manifest.metadataCustoms().size());
+                for (Map.Entry<String, String> e : manifest.metadataCustoms().entrySet()) {
+                    out.put(e.getKey(), ComponentCodec.readMetadataCustom(componentsDir.resolve(e.getValue()), registry));
+                }
+                return Map.copyOf(out);
+            } catch (IOException e) {
+                throw new UncheckedIOException("failed to read metadata customs", e);
+            }
+        };
+
+        // Header-derived fields (version / clusterUUIDCommitted / settings / hashes /
+        // templates) all share the same header file, so we route their suppliers through
+        // {@code headerSupplier} — exactly one file open feeds all of them.
+        return MetadataLazyComposer.composeFresh(
+            manifest.clusterUuid(),
+            manifest.clusterUuidCommitted(),
+            manifest.metadataVersion(),
+            coordSupplier,
+            () -> headerSupplier.get().transientSettings(),
+            () -> headerSupplier.get().persistentSettings(),
+            () -> headerSupplier.get().hashesOfConsistentSettings(),
+            lazyIndices,
+            () -> headerSupplier.get().templates(),
+            customsSupplier
+        );
+    }
+
+    private static <T> Supplier<T> memoize(Supplier<T> delegate) {
+        return new org.opensearch.common.util.CachedSupplier<>(delegate);
     }
 
     private static RoutingTable readRouting(Path componentsDir, ComponentManifest manifest) {

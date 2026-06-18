@@ -61,4 +61,46 @@ public final class MetadataLazyComposer {
             customsOverride
         );
     }
+
+    /**
+     * Returns a fully-lazy {@link Metadata}: every supplier-typed component is invoked on
+     * first access, the {@link LazyIndices} defers per-index materialization to its own
+     * per-key suppliers, and the index-name arrays / indices lookup / system-templates
+     * lookup are computed on first access from {@code indices} and the metadata customs
+     * (no eager iteration, no validation pass). Intended for file- and remote-backed
+     * suppliers reading state that was already validated when it was published.
+     *
+     * Pass {@code null} for any optional supplier to default to the equivalent empty value
+     * (no coordination, empty settings, empty hashes, empty templates, empty customs).
+     */
+    public static Metadata composeFresh(
+        String clusterUUID,
+        boolean clusterUUIDCommitted,
+        long version,
+        Supplier<CoordinationMetadata> coordinationMetadataSupplier,
+        Supplier<Settings> transientSettingsSupplier,
+        Supplier<Settings> persistentSettingsSupplier,
+        Supplier<DiffableStringMap> hashesOfConsistentSettingsSupplier,
+        LazyIndices indices,
+        Supplier<TemplatesMetadata> templatesSupplier,
+        Supplier<Map<String, Metadata.Custom>> customsSupplier
+    ) {
+        return new Metadata(
+            clusterUUID,
+            clusterUUIDCommitted,
+            version,
+            coordinationMetadataSupplier != null ? coordinationMetadataSupplier : () -> CoordinationMetadata.EMPTY_METADATA,
+            transientSettingsSupplier != null ? transientSettingsSupplier : () -> Settings.EMPTY,
+            persistentSettingsSupplier != null ? persistentSettingsSupplier : () -> Settings.EMPTY,
+            hashesOfConsistentSettingsSupplier != null
+                ? hashesOfConsistentSettingsSupplier
+                : () -> new DiffableStringMap(java.util.Map.of()),
+            indices != null ? indices : LazyIndices.empty(),
+            templatesSupplier != null ? templatesSupplier : () -> new TemplatesMetadata(java.util.Map.of()),
+            customsSupplier != null ? customsSupplier : java.util.Map::of,
+            null,  // index name arrays — compute on first access
+            null,  // indices lookup — compute on first access
+            null   // system templates lookup — compute on first access
+        );
+    }
 }

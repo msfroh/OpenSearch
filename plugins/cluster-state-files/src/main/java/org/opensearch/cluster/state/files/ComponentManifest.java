@@ -28,28 +28,22 @@ import java.util.TreeMap;
 /**
  * Manifest for the per-component write-once layout (see {@link FileClusterStateLayout}).
  * Names the file that stands in for each top-level component, each per-index entry, each
- * {@code ClusterState.Custom}, and each {@code Metadata.Custom}.
+ * {@code ClusterState.Custom}, and each {@code Metadata.Custom}. Also carries the cheap
+ * scalar identity fields ({@code metadata_version}, {@code cluster_uuid_committed}) so a
+ * lazy reader can populate {@link org.opensearch.cluster.metadata.Metadata}'s eager fields
+ * without opening the metadata header component file.
  * <p>
  * Each filename is a components-relative path (e.g. {@code "indices/foo-uuid-<sha>.bin"}).
  * Equal-content components published in successive states reuse the same filename, so the
  * manifest is a structural diff of the cluster state: whatever changed has a new content
  * address; whatever didn't is referenced by its prior filename.
- *
- * @param clusterStateVersion {@code ClusterState.version()}
- * @param stateUuid           {@code ClusterState.stateUUID()}
- * @param clusterUuid         {@code Metadata.clusterUUID()}
- * @param clusterName         {@code ClusterState.getClusterName().value()}
- * @param components          slot key (see {@code SLOT_*} on {@link FileClusterStateLayout})
- *                            → components-relative filename
- * @param indices             index UUID → components-relative filename
- * @param stateCustoms        {@code ClusterState.Custom} type name → components-relative
- *                            filename
- * @param metadataCustoms     {@code Metadata.Custom} type name → components-relative filename
  */
 record ComponentManifest(
     long clusterStateVersion,
     String stateUuid,
     String clusterUuid,
+    boolean clusterUuidCommitted,
+    long metadataVersion,
     String clusterName,
     Map<String, String> components,
     Map<String, String> indices,
@@ -73,6 +67,8 @@ record ComponentManifest(
         out.field(FileClusterStateLayout.MANIFEST_CLUSTER_STATE_VERSION, clusterStateVersion);
         out.field(FileClusterStateLayout.MANIFEST_STATE_UUID, stateUuid);
         out.field(FileClusterStateLayout.MANIFEST_CLUSTER_UUID, clusterUuid);
+        out.field(FileClusterStateLayout.MANIFEST_CLUSTER_UUID_COMMITTED, clusterUuidCommitted);
+        out.field(FileClusterStateLayout.MANIFEST_METADATA_VERSION, metadataVersion);
         out.field(FileClusterStateLayout.MANIFEST_CLUSTER_NAME, clusterName);
         writeStringMap(out, FileClusterStateLayout.MANIFEST_COMPONENTS, components);
         writeStringMap(out, FileClusterStateLayout.MANIFEST_INDICES, indices);
@@ -115,11 +111,15 @@ record ComponentManifest(
         long version = requireLong(map, FileClusterStateLayout.MANIFEST_CLUSTER_STATE_VERSION);
         String stateUuid = requireString(map, FileClusterStateLayout.MANIFEST_STATE_UUID);
         String clusterUuid = requireString(map, FileClusterStateLayout.MANIFEST_CLUSTER_UUID);
+        boolean clusterUuidCommitted = requireBooleanOrDefault(map, FileClusterStateLayout.MANIFEST_CLUSTER_UUID_COMMITTED, false);
+        long metadataVersion = requireLongOrDefault(map, FileClusterStateLayout.MANIFEST_METADATA_VERSION, 0L);
         String clusterName = requireString(map, FileClusterStateLayout.MANIFEST_CLUSTER_NAME);
         return new ComponentManifest(
             version,
             stateUuid,
             clusterUuid,
+            clusterUuidCommitted,
+            metadataVersion,
             clusterName,
             stringMap(map, FileClusterStateLayout.MANIFEST_COMPONENTS),
             stringMap(map, FileClusterStateLayout.MANIFEST_INDICES),
@@ -137,6 +137,28 @@ record ComponentManifest(
             return num.longValue();
         }
         throw new IllegalArgumentException("manifest key '" + key + "' is not a number: " + v);
+    }
+
+    private static long requireLongOrDefault(Map<String, Object> map, String key, long fallback) {
+        Object v = map.get(key);
+        if (v == null) {
+            return fallback;
+        }
+        if (v instanceof Number num) {
+            return num.longValue();
+        }
+        throw new IllegalArgumentException("manifest key '" + key + "' is not a number: " + v);
+    }
+
+    private static boolean requireBooleanOrDefault(Map<String, Object> map, String key, boolean fallback) {
+        Object v = map.get(key);
+        if (v == null) {
+            return fallback;
+        }
+        if (v instanceof Boolean b) {
+            return b;
+        }
+        throw new IllegalArgumentException("manifest key '" + key + "' is not a boolean: " + v);
     }
 
     private static String requireString(Map<String, Object> map, String key) {

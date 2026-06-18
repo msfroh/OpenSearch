@@ -41,7 +41,7 @@ public class ComponentManifestTests extends OpenSearchTestCase {
     public void testNullCollectionsAreRejected() {
         expectThrows(
             NullPointerException.class,
-            () -> new ComponentManifest(1L, "u", "c", "n", null, Map.of(), Map.of(), Map.of())
+            () -> new ComponentManifest(1L, "u", "c", false, 1L, "n", null, Map.of(), Map.of(), Map.of())
         );
     }
 
@@ -75,6 +75,8 @@ public class ComponentManifestTests extends OpenSearchTestCase {
             1L,
             "u",
             "c",
+            false,
+            1L,
             "n",
             mutableComponents,
             Map.of(),
@@ -93,6 +95,8 @@ public class ComponentManifestTests extends OpenSearchTestCase {
             42L,
             "state-uuid",
             "cluster-uuid",
+            true,
+            17L,
             "test-cluster",
             Map.of(
                 FileClusterStateLayout.SLOT_METADATA,

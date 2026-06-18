@@ -74,7 +74,10 @@ public class FileClusterStateSupplierLazinessTests extends OpenSearchTestCase {
         // Reading any other slot must fail now: the underlying file is gone.
         assertReadFails(lazy::routingTable);
         assertReadFails(lazy::nodes);
-        assertReadFails(lazy::metadata);
+        // Touching the metadata header (via transientSettings) forces the header file read.
+        assertReadFails(() -> lazy.metadata().transientSettings());
+        // Touching any index forces that index's file read.
+        assertReadFails(() -> lazy.metadata().index("foo"));
     }
 
     public void testAccessingOnlyRoutingDoesNotOpenOtherSlotFiles() throws IOException {
@@ -87,7 +90,8 @@ public class FileClusterStateSupplierLazinessTests extends OpenSearchTestCase {
         assertNotNull(lazy.routingTable());
         assertReadFails(lazy::blocks);
         assertReadFails(lazy::nodes);
-        assertReadFails(lazy::metadata);
+        assertReadFails(() -> lazy.metadata().transientSettings());
+        assertReadFails(() -> lazy.metadata().index("foo"));
     }
 
     public void testAccessingOnlyNodesDoesNotOpenOtherSlotFiles() throws IOException {
@@ -100,7 +104,37 @@ public class FileClusterStateSupplierLazinessTests extends OpenSearchTestCase {
         assertNotNull(lazy.nodes());
         assertReadFails(lazy::blocks);
         assertReadFails(lazy::routingTable);
-        assertReadFails(lazy::metadata);
+        assertReadFails(() -> lazy.metadata().transientSettings());
+        assertReadFails(() -> lazy.metadata().index("foo"));
+    }
+
+    public void testReadingOnlyOneIndexDoesNotOpenOtherIndexFiles() throws IOException {
+        publishStateWithIndices("foo", "bar", "baz");
+        ClusterState lazy = freshLazyRead();
+
+        // Delete every index file EXCEPT foo's. If LazyIndices.get("foo") opened bar/baz
+        // it would silently materialize them; after their files are gone, that would fail.
+        // We need foo's filename; read it out of the manifest before deleting siblings.
+        ComponentManifest manifest = ComponentManifest.read(stateDir.resolve(FileClusterStateLayout.CURRENT_MANIFEST));
+        String fooFile = manifest.indices().get("foo");
+        Path indicesDir = stateDir.resolve(COMPONENTS_DIR).resolve(FileClusterStateLayout.COMPONENTS_INDICES_DIR);
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(indicesDir)) {
+            for (Path p : stream) {
+                String relative = COMPONENTS_DIR + "/" + FileClusterStateLayout.COMPONENTS_INDICES_DIR + "/"
+                    + p.getFileName().toString();
+                String rel = FileClusterStateLayout.COMPONENTS_INDICES_DIR + "/" + p.getFileName().toString();
+                if (rel.equals(fooFile) == false) {
+                    Files.delete(p);
+                }
+            }
+        }
+
+        // foo can still be read.
+        assertNotNull(lazy.metadata().index("foo"));
+        // bar and baz cannot — their files are gone, but they were never touched so we
+        // didn't notice until the explicit access here.
+        assertReadFails(() -> lazy.metadata().index("bar"));
+        assertReadFails(() -> lazy.metadata().index("baz"));
     }
 
     public void testGetClusterStateForTaskWithInProgressHintSkipsRoutingAndIndexFiles() throws IOException {

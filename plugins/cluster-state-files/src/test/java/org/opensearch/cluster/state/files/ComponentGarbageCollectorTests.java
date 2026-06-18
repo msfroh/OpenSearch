@@ -48,16 +48,16 @@ public class ComponentGarbageCollectorTests extends OpenSearchTestCase {
 
         ClusterState s1 = buildState("v1", indexWithMarker("foo", "a"), indexWithMarker("bar", "common"));
         publisher.writeAll(s1);
-        String foo_a = currentManifest().indices().get("foo-uuid");
-        String bar_common = currentManifest().indices().get("bar-uuid");
+        String foo_a = currentManifest().indices().get("foo");
+        String bar_common = currentManifest().indices().get("bar");
 
         ClusterState s2 = buildState("v2", indexWithMarker("foo", "b"), indexWithMarker("bar", "common"));
         publisher.writeAll(s2);
-        String foo_b = currentManifest().indices().get("foo-uuid");
+        String foo_b = currentManifest().indices().get("foo");
 
         ClusterState s3 = buildState("v3", indexWithMarker("foo", "c"), indexWithMarker("bar", "common"));
         publisher.writeAll(s3);
-        String foo_c = currentManifest().indices().get("foo-uuid");
+        String foo_c = currentManifest().indices().get("foo");
 
         // After the third publish only s2 and s3 manifests should remain.
         assertEquals(2, listManifests().size());

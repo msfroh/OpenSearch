@@ -275,16 +275,32 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
 
     private final transient CachedSupplier<int[]> shardCountsSupplier; // [total, openLocal, openRemote]
 
-    private final String[] allIndices;
-    private final String[] visibleIndices;
-    private final String[] allOpenIndices;
-    private final String[] visibleOpenIndices;
-    private final String[] allClosedIndices;
-    private final String[] visibleClosedIndices;
+    /**
+     * Bundle of the six concrete-index name arrays (all, visible, allOpen, visibleOpen,
+     * allClosed, visibleClosed). A single iteration over {@link #indices} fills all six,
+     * so we cache them together rather than via six independent suppliers.
+     */
+    record IndexNameArrays(
+        String[] allIndices,
+        String[] visibleIndices,
+        String[] allOpenIndices,
+        String[] visibleOpenIndices,
+        String[] allClosedIndices,
+        String[] visibleClosedIndices
+    ) {
+        static final IndexNameArrays EMPTY = new IndexNameArrays(
+            Strings.EMPTY_ARRAY,
+            Strings.EMPTY_ARRAY,
+            Strings.EMPTY_ARRAY,
+            Strings.EMPTY_ARRAY,
+            Strings.EMPTY_ARRAY,
+            Strings.EMPTY_ARRAY
+        );
+    }
 
-    private final SortedMap<String, IndexAbstraction> indicesLookup;
-
-    private final Map<String, SortedMap<Long, String>> systemTemplatesLookup;
+    private final CachedSupplier<IndexNameArrays> indexNameArraysSupplier;
+    private final CachedSupplier<SortedMap<String, IndexAbstraction>> indicesLookupSupplier;
+    private final CachedSupplier<Map<String, SortedMap<Long, String>>> systemTemplatesLookupSupplier;
 
     Metadata(
         String clusterUUID,
@@ -317,14 +333,16 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             LazyIndices.ofEager(indices),
             () -> new TemplatesMetadata(templates),
             () -> Collections.unmodifiableMap(customs),
-            allIndices,
-            visibleIndices,
-            allOpenIndices,
-            visibleOpenIndices,
-            allClosedIndices,
-            visibleClosedIndices,
-            indicesLookup,
-            systemTemplatesLookup
+            () -> new IndexNameArrays(
+                allIndices,
+                visibleIndices,
+                allOpenIndices,
+                visibleOpenIndices,
+                allClosedIndices,
+                visibleClosedIndices
+            ),
+            () -> indicesLookup,
+            () -> systemTemplatesLookup
         );
     }
 
@@ -358,14 +376,9 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         LazyIndices indices,
         Supplier<TemplatesMetadata> templatesSupplier,
         Supplier<Map<String, Custom>> customsSupplier,
-        String[] allIndices,
-        String[] visibleIndices,
-        String[] allOpenIndices,
-        String[] visibleOpenIndices,
-        String[] allClosedIndices,
-        String[] visibleClosedIndices,
-        SortedMap<String, IndexAbstraction> indicesLookup,
-        Map<String, SortedMap<Long, String>> systemTemplatesLookup
+        Supplier<IndexNameArrays> indexNameArraysSupplier,
+        Supplier<SortedMap<String, IndexAbstraction>> indicesLookupSupplier,
+        Supplier<Map<String, SortedMap<Long, String>>> systemTemplatesLookupSupplier
     ) {
         this.clusterUUID = clusterUUID;
         this.clusterUUIDCommitted = clusterUUIDCommitted;
@@ -402,14 +415,19 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             return new int[] { totalNumberOfShards, totalOpenLocalOnlyIndexShards, totalOpenRemoteCapableIndexShards };
         });
 
-        this.allIndices = allIndices;
-        this.visibleIndices = visibleIndices;
-        this.allOpenIndices = allOpenIndices;
-        this.visibleOpenIndices = visibleOpenIndices;
-        this.allClosedIndices = allClosedIndices;
-        this.visibleClosedIndices = visibleClosedIndices;
-        this.indicesLookup = indicesLookup;
-        this.systemTemplatesLookup = systemTemplatesLookup;
+        // Lookup suppliers default to lazy computation from this.indices / this.customs when
+        // null. The Builder path passes already-computed values (wrapped in () -> value); the
+        // lazy file path passes null so per-index files only open when getIndicesLookup() or
+        // getConcreteAllIndices()-and-friends are actually called.
+        this.indexNameArraysSupplier = indexNameArraysSupplier != null
+            ? asCached(indexNameArraysSupplier)
+            : new CachedSupplier<>(() -> computeIndexNameArrays(this.indices));
+        this.indicesLookupSupplier = indicesLookupSupplier != null
+            ? asCached(indicesLookupSupplier)
+            : new CachedSupplier<>(() -> computeIndicesLookup(this.indices, this.customsSupplier.get()));
+        this.systemTemplatesLookupSupplier = systemTemplatesLookupSupplier != null
+            ? asCached(systemTemplatesLookupSupplier)
+            : new CachedSupplier<>(() -> computeSystemTemplatesLookup(this.customsSupplier.get()));
     }
 
     private static <T> CachedSupplier<T> asCached(Supplier<T> supplier) {
@@ -451,15 +469,119 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
             indicesOverride != null ? indicesOverride : prior.indices,
             templatesOverride != null ? templatesOverride : prior.templatesSupplier,
             customsOverride != null ? customsOverride : prior.customsSupplier,
-            prior.allIndices,
-            prior.visibleIndices,
-            prior.allOpenIndices,
-            prior.visibleOpenIndices,
-            prior.allClosedIndices,
-            prior.visibleClosedIndices,
-            prior.indicesLookup,
-            prior.systemTemplatesLookup
+            // Index keys are invariant under composeFromPrior (caller contract), so the index
+            // name arrays and lookup never change. Inherit prior's suppliers by reference —
+            // if prior never materialized them, neither will the composed Metadata.
+            prior.indexNameArraysSupplier,
+            prior.indicesLookupSupplier,
+            prior.systemTemplatesLookupSupplier
         );
+    }
+
+    // ---- Static lookup computation helpers (also reachable from the lazy ctor's default
+    // suppliers). These iterate {@code indices} and {@code customs} on first access. They
+    // skip the duplicate-name validation that {@link Builder#build()} performs eagerly —
+    // file/remote suppliers feed in data that was already validated when it was published.
+
+    static IndexNameArrays computeIndexNameArrays(Map<String, IndexMetadata> indices) {
+        if (indices.isEmpty()) {
+            return IndexNameArrays.EMPTY;
+        }
+        List<String> allIndices = new ArrayList<>(indices.size());
+        List<String> visibleIndices = new ArrayList<>();
+        List<String> allOpenIndices = new ArrayList<>();
+        List<String> visibleOpenIndices = new ArrayList<>();
+        List<String> allClosedIndices = new ArrayList<>();
+        List<String> visibleClosedIndices = new ArrayList<>();
+        for (IndexMetadata indexMetadata : indices.values()) {
+            String name = indexMetadata.getIndex().getName();
+            allIndices.add(name);
+            boolean visible = IndexMetadata.INDEX_HIDDEN_SETTING.get(indexMetadata.getSettings()) == false;
+            if (visible) {
+                visibleIndices.add(name);
+            }
+            if (indexMetadata.getState() == IndexMetadata.State.OPEN) {
+                allOpenIndices.add(name);
+                if (visible) {
+                    visibleOpenIndices.add(name);
+                }
+            } else if (indexMetadata.getState() == IndexMetadata.State.CLOSE) {
+                allClosedIndices.add(name);
+                if (visible) {
+                    visibleClosedIndices.add(name);
+                }
+            }
+        }
+        return new IndexNameArrays(
+            allIndices.toArray(Strings.EMPTY_ARRAY),
+            visibleIndices.toArray(Strings.EMPTY_ARRAY),
+            allOpenIndices.toArray(Strings.EMPTY_ARRAY),
+            visibleOpenIndices.toArray(Strings.EMPTY_ARRAY),
+            allClosedIndices.toArray(Strings.EMPTY_ARRAY),
+            visibleClosedIndices.toArray(Strings.EMPTY_ARRAY)
+        );
+    }
+
+    static SortedMap<String, IndexAbstraction> computeIndicesLookup(
+        Map<String, IndexMetadata> indices,
+        Map<String, Custom> customs
+    ) {
+        SortedMap<String, IndexAbstraction> indicesLookup = new TreeMap<>();
+        Map<String, DataStream> indexToDataStreamLookup = new HashMap<>();
+        DataStreamMetadata dataStreamMetadata = (DataStreamMetadata) customs.get(DataStreamMetadata.TYPE);
+        if (dataStreamMetadata != null && indices.size() > 0) {
+            for (DataStream dataStream : dataStreamMetadata.dataStreams().values()) {
+                List<IndexMetadata> backingIndices = dataStream.getIndices()
+                    .stream()
+                    .map(index -> indices.get(index.getName()))
+                    .collect(Collectors.toList());
+                indicesLookup.put(dataStream.getName(), new IndexAbstraction.DataStream(dataStream, backingIndices));
+                for (Index i : dataStream.getIndices()) {
+                    indexToDataStreamLookup.put(i.getName(), dataStream);
+                }
+            }
+        }
+        for (IndexMetadata indexMetadata : indices.values()) {
+            IndexAbstraction.Index index;
+            DataStream parent = indexToDataStreamLookup.get(indexMetadata.getIndex().getName());
+            if (parent != null) {
+                index = new IndexAbstraction.Index(indexMetadata, (IndexAbstraction.DataStream) indicesLookup.get(parent.getName()));
+            } else {
+                index = new IndexAbstraction.Index(indexMetadata);
+            }
+            indicesLookup.put(indexMetadata.getIndex().getName(), index);
+            for (AliasMetadata aliasMetadata : indexMetadata.getAliases().values()) {
+                indicesLookup.compute(aliasMetadata.getAlias(), (aliasName, alias) -> {
+                    if (alias == null) {
+                        return new IndexAbstraction.Alias(aliasMetadata, indexMetadata);
+                    }
+                    ((IndexAbstraction.Alias) alias).addIndex(indexMetadata);
+                    return alias;
+                });
+            }
+        }
+        indicesLookup.values()
+            .stream()
+            .filter(aliasOrIndex -> aliasOrIndex.getType() == IndexAbstraction.Type.ALIAS)
+            .forEach(alias -> ((IndexAbstraction.Alias) alias).computeAndValidateAliasProperties());
+        return Collections.unmodifiableSortedMap(indicesLookup);
+    }
+
+    static Map<String, SortedMap<Long, String>> computeSystemTemplatesLookup(Map<String, Custom> customs) {
+        ComponentTemplateMetadata cmd = (ComponentTemplateMetadata) customs.get(ComponentTemplateMetadata.TYPE);
+        if (cmd == null) {
+            return Collections.emptyMap();
+        }
+        Map<String, SortedMap<Long, String>> out = new HashMap<>();
+        for (Map.Entry<String, ComponentTemplate> e : cmd.componentTemplates().entrySet()) {
+            String k = e.getKey();
+            ComponentTemplate v = e.getValue();
+            if (MetadataIndexTemplateService.isSystemTemplate(v)) {
+                SystemTemplateMetadata templateMetadata = SystemTemplateMetadata.fromComponentTemplate(k);
+                out.computeIfAbsent(templateMetadata.name(), name -> new TreeMap<>()).put(templateMetadata.version(), k);
+            }
+        }
+        return Collections.unmodifiableMap(out);
     }
 
     public long version() {
@@ -525,7 +647,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public SortedMap<String, IndexAbstraction> getIndicesLookup() {
-        return indicesLookup;
+        return indicesLookupSupplier.get();
     }
 
     /**
@@ -736,42 +858,42 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
      * Returns all the concrete indices.
      */
     public String[] getConcreteAllIndices() {
-        return allIndices;
+        return indexNameArraysSupplier.get().allIndices();
     }
 
     /**
      * Returns all the concrete indices that are not hidden.
      */
     public String[] getConcreteVisibleIndices() {
-        return visibleIndices;
+        return indexNameArraysSupplier.get().visibleIndices();
     }
 
     /**
      * Returns all of the concrete indices that are open.
      */
     public String[] getConcreteAllOpenIndices() {
-        return allOpenIndices;
+        return indexNameArraysSupplier.get().allOpenIndices();
     }
 
     /**
      * Returns all of the concrete indices that are open and not hidden.
      */
     public String[] getConcreteVisibleOpenIndices() {
-        return visibleOpenIndices;
+        return indexNameArraysSupplier.get().visibleOpenIndices();
     }
 
     /**
      * Returns all of the concrete indices that are closed.
      */
     public String[] getConcreteAllClosedIndices() {
-        return allClosedIndices;
+        return indexNameArraysSupplier.get().allClosedIndices();
     }
 
     /**
      * Returns all of the concrete indices that are closed and not hidden.
      */
     public String[] getConcreteVisibleClosedIndices() {
-        return visibleClosedIndices;
+        return indexNameArraysSupplier.get().visibleClosedIndices();
     }
 
     /**
@@ -961,7 +1083,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
     }
 
     public Map<String, SortedMap<Long, String>> systemTemplatesLookup() {
-        return systemTemplatesLookup;
+        return systemTemplatesLookupSupplier.get();
     }
 
     public Map<String, ComposableIndexTemplate> templatesV2() {
@@ -1757,7 +1879,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
                     previousMetadata.customs().get(ComponentTemplateMetadata.TYPE),
                     this.customs.get(ComponentTemplateMetadata.TYPE)
                 )) {
-                systemTemplatesLookup = Collections.unmodifiableMap(previousMetadata.systemTemplatesLookup);
+                systemTemplatesLookup = Collections.unmodifiableMap(previousMetadata.systemTemplatesLookup());
             } else {
                 systemTemplatesLookup = new HashMap<>();
                 Optional.ofNullable((ComponentTemplateMetadata) this.customs.get(ComponentTemplateMetadata.TYPE))
@@ -1779,6 +1901,7 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
         }
 
         protected Metadata buildMetadataWithPreviousIndicesLookups() {
+            IndexNameArrays priorArrays = previousMetadata.indexNameArraysSupplier.get();
             return new Metadata(
                 clusterUUID,
                 clusterUUIDCommitted,
@@ -1790,13 +1913,13 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
                 indices,
                 templates,
                 customs,
-                Arrays.copyOf(previousMetadata.allIndices, previousMetadata.allIndices.length),
-                Arrays.copyOf(previousMetadata.visibleIndices, previousMetadata.visibleIndices.length),
-                Arrays.copyOf(previousMetadata.allOpenIndices, previousMetadata.allOpenIndices.length),
-                Arrays.copyOf(previousMetadata.visibleOpenIndices, previousMetadata.visibleOpenIndices.length),
-                Arrays.copyOf(previousMetadata.allClosedIndices, previousMetadata.allClosedIndices.length),
-                Arrays.copyOf(previousMetadata.visibleClosedIndices, previousMetadata.visibleClosedIndices.length),
-                Collections.unmodifiableSortedMap(previousMetadata.indicesLookup),
+                Arrays.copyOf(priorArrays.allIndices(), priorArrays.allIndices().length),
+                Arrays.copyOf(priorArrays.visibleIndices(), priorArrays.visibleIndices().length),
+                Arrays.copyOf(priorArrays.allOpenIndices(), priorArrays.allOpenIndices().length),
+                Arrays.copyOf(priorArrays.visibleOpenIndices(), priorArrays.visibleOpenIndices().length),
+                Arrays.copyOf(priorArrays.allClosedIndices(), priorArrays.allClosedIndices().length),
+                Arrays.copyOf(priorArrays.visibleClosedIndices(), priorArrays.visibleClosedIndices().length),
+                Collections.unmodifiableSortedMap(previousMetadata.indicesLookupSupplier.get()),
                 systemTemplatesLookup
             );
         }

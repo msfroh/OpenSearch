@@ -15,7 +15,6 @@ import org.opensearch.test.OpenSearchTestCase;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -40,14 +39,9 @@ public class MetadataLazinessTests extends OpenSearchTestCase {
             LazyIndices.empty(),
             counting(new TemplatesMetadata(Collections.emptyMap()), templatesCalls),
             counting(Collections.<String, Metadata.Custom>unmodifiableMap(new HashMap<>()), customsCalls),
-            new String[0],
-            new String[0],
-            new String[0],
-            new String[0],
-            new String[0],
-            new String[0],
-            Collections.unmodifiableSortedMap(new TreeMap<>()),
-            Collections.emptyMap()
+            null,  // index name arrays — compute lazily
+            null,  // indices lookup — compute lazily
+            null   // system templates lookup — compute lazily
         );
 
         assertEquals(0, coordinationCalls.get());
@@ -148,14 +142,9 @@ public class MetadataLazinessTests extends OpenSearchTestCase {
             lazy,
             () -> new TemplatesMetadata(Collections.emptyMap()),
             () -> Collections.unmodifiableMap(new HashMap<>()),
-            new String[0],
-            new String[0],
-            new String[0],
-            new String[0],
-            new String[0],
-            new String[0],
-            Collections.unmodifiableSortedMap(new TreeMap<>()),
-            Collections.emptyMap()
+            null,
+            null,
+            null
         );
 
         // Touching one named index materializes only that one.

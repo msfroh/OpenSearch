@@ -58,6 +58,8 @@ final class FileClusterStateLayout {
     static final String MANIFEST_CLUSTER_STATE_VERSION = "cluster_state_version";
     static final String MANIFEST_STATE_UUID = "state_uuid";
     static final String MANIFEST_CLUSTER_UUID = "cluster_uuid";
+    static final String MANIFEST_CLUSTER_UUID_COMMITTED = "cluster_uuid_committed";
+    static final String MANIFEST_METADATA_VERSION = "metadata_version";
     static final String MANIFEST_CLUSTER_NAME = "cluster_name";
     static final String MANIFEST_COMPONENTS = "components";
     static final String MANIFEST_INDICES = "indices";
