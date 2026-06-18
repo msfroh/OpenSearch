@@ -94,6 +94,71 @@ public class ClusterStateLazinessTests extends OpenSearchTestCase {
         assertEquals("uuid", state.stateUUID());
     }
 
+    public void testBuilderCopyPropagatesLazinessWhenNothingMutated() {
+        AtomicInteger metadataCalls = new AtomicInteger();
+        AtomicInteger routingCalls = new AtomicInteger();
+        AtomicInteger nodesCalls = new AtomicInteger();
+        AtomicInteger blocksCalls = new AtomicInteger();
+        AtomicInteger customsCalls = new AtomicInteger();
+
+        ClusterState source = new ClusterState(
+            ClusterName.DEFAULT,
+            1L,
+            "src-uuid",
+            counting(Metadata.EMPTY_METADATA, metadataCalls),
+            counting(RoutingTable.EMPTY_ROUTING_TABLE, routingCalls),
+            counting(DiscoveryNodes.EMPTY_NODES, nodesCalls),
+            counting(ClusterBlocks.EMPTY_CLUSTER_BLOCK, blocksCalls),
+            counting(Collections.<String, ClusterState.Custom>unmodifiableMap(new HashMap<>()), customsCalls),
+            -1,
+            false
+        );
+
+        // Pure copy: bumping the version shouldn't force any component to materialize.
+        ClusterState copy = ClusterState.builder(source).incrementVersion().build();
+        assertEquals(0, metadataCalls.get());
+        assertEquals(0, routingCalls.get());
+        assertEquals(0, nodesCalls.get());
+        assertEquals(0, blocksCalls.get());
+        assertEquals(0, customsCalls.get());
+
+        // The copy and source share the same per-component suppliers — accessing copy.metadata()
+        // materializes once, and source.metadata() returns the same instance for free.
+        copy.metadata();
+        assertEquals(1, metadataCalls.get());
+        assertSame(copy.metadata(), source.metadata());
+        assertEquals(1, metadataCalls.get());
+    }
+
+    public void testBuilderSetterMaterializesOnlyTheTouchedSlice() {
+        AtomicInteger metadataCalls = new AtomicInteger();
+        AtomicInteger routingCalls = new AtomicInteger();
+        AtomicInteger nodesCalls = new AtomicInteger();
+        AtomicInteger blocksCalls = new AtomicInteger();
+        AtomicInteger customsCalls = new AtomicInteger();
+
+        ClusterState source = new ClusterState(
+            ClusterName.DEFAULT,
+            1L,
+            "src-uuid",
+            counting(Metadata.EMPTY_METADATA, metadataCalls),
+            counting(RoutingTable.EMPTY_ROUTING_TABLE, routingCalls),
+            counting(DiscoveryNodes.EMPTY_NODES, nodesCalls),
+            counting(ClusterBlocks.EMPTY_CLUSTER_BLOCK, blocksCalls),
+            counting(Collections.<String, ClusterState.Custom>unmodifiableMap(new HashMap<>()), customsCalls),
+            -1,
+            false
+        );
+
+        // Swap in fresh blocks; nothing else should materialize.
+        ClusterState rebuilt = ClusterState.builder(source).blocks(ClusterBlocks.EMPTY_CLUSTER_BLOCK).build();
+        assertEquals(0, metadataCalls.get());
+        assertEquals(0, routingCalls.get());
+        assertEquals(0, nodesCalls.get());
+        assertEquals(0, blocksCalls.get()); // source's blocks supplier was never asked
+        assertEquals(0, customsCalls.get());
+    }
+
     private static <T> Supplier<T> counting(T value, AtomicInteger counter) {
         return () -> {
             counter.incrementAndGet();

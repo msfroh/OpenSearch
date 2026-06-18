@@ -647,30 +647,37 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         private final ClusterName clusterName;
         private long version = 0;
         private String uuid = Strings.UNKNOWN_UUID_VALUE;
-        private Metadata metadata = Metadata.EMPTY_METADATA;
-        private RoutingTable routingTable = RoutingTable.EMPTY_ROUTING_TABLE;
-        private DiscoveryNodes nodes = DiscoveryNodes.EMPTY_NODES;
-        private ClusterBlocks blocks = ClusterBlocks.EMPTY_CLUSTER_BLOCK;
-        private final Map<String, Custom> customs;
+        private CachedSupplier<Metadata> metadataSupplier = new CachedSupplier<>(() -> Metadata.EMPTY_METADATA);
+        private CachedSupplier<RoutingTable> routingTableSupplier = new CachedSupplier<>(() -> RoutingTable.EMPTY_ROUTING_TABLE);
+        private CachedSupplier<DiscoveryNodes> nodesSupplier = new CachedSupplier<>(() -> DiscoveryNodes.EMPTY_NODES);
+        private CachedSupplier<ClusterBlocks> blocksSupplier = new CachedSupplier<>(() -> ClusterBlocks.EMPTY_CLUSTER_BLOCK);
+        private CachedSupplier<Map<String, Custom>> customsSupplier;
+        // null until the first putCustom/removeCustom/customs(Map) call. While null, customs are
+        // sourced from customsSupplier without ever materializing it. On first mutation we copy the
+        // source's customs into this mutable map and switch reads/writes to it.
+        private Map<String, Custom> customsOverride;
         private boolean fromDiff;
         private int minimumClusterManagerNodesOnPublishingClusterManager = -1;
 
         public Builder(ClusterState state) {
             this.clusterName = state.clusterName;
-            this.version = state.version();
-            this.uuid = state.stateUUID();
-            this.nodes = state.nodes();
-            this.routingTable = state.routingTable();
-            this.metadata = state.metadata();
-            this.blocks = state.blocks();
-            this.customs = new HashMap<>(state.customs());
+            this.version = state.version;
+            this.uuid = state.stateUUID;
+            // Propagate supplier references — no accessors on state are invoked here.
+            this.metadataSupplier = state.metadataSupplier;
+            this.routingTableSupplier = state.routingTableSupplier;
+            this.nodesSupplier = state.nodesSupplier;
+            this.blocksSupplier = state.blocksSupplier;
+            this.customsSupplier = state.customsSupplier;
+            this.customsOverride = null;
             this.minimumClusterManagerNodesOnPublishingClusterManager = state.minimumClusterManagerNodesOnPublishingClusterManager;
             this.fromDiff = false;
         }
 
         public Builder(ClusterName clusterName) {
-            customs = new HashMap<>();
             this.clusterName = clusterName;
+            this.customsSupplier = new CachedSupplier<>(() -> Collections.unmodifiableMap(new HashMap<>()));
+            this.customsOverride = null;
         }
 
         public Builder nodes(DiscoveryNodes.Builder nodesBuilder) {
@@ -678,16 +685,16 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         }
 
         public Builder nodes(DiscoveryNodes nodes) {
-            this.nodes = nodes;
+            this.nodesSupplier = new CachedSupplier<>(() -> nodes);
             return this;
         }
 
         public DiscoveryNodes nodes() {
-            return nodes;
+            return nodesSupplier.get();
         }
 
         public Builder routingTable(RoutingTable routingTable) {
-            this.routingTable = routingTable;
+            this.routingTableSupplier = new CachedSupplier<>(() -> routingTable);
             return this;
         }
 
@@ -696,7 +703,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         }
 
         public Builder metadata(Metadata metadata) {
-            this.metadata = metadata;
+            this.metadataSupplier = new CachedSupplier<>(() -> metadata);
             return this;
         }
 
@@ -705,7 +712,7 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         }
 
         public Builder blocks(ClusterBlocks blocks) {
-            this.blocks = blocks;
+            this.blocksSupplier = new CachedSupplier<>(() -> blocks);
             return this;
         }
 
@@ -731,20 +738,29 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         }
 
         public Builder putCustom(String type, Custom custom) {
-            customs.put(type, Objects.requireNonNull(custom, type));
+            materializeCustoms();
+            customsOverride.put(type, Objects.requireNonNull(custom, type));
             return this;
         }
 
         public Builder removeCustom(String type) {
-            customs.remove(type);
+            materializeCustoms();
+            customsOverride.remove(type);
             return this;
         }
 
         public Builder customs(final Map<String, Custom> customs) {
             StreamSupport.stream(Spliterators.spliterator(customs.entrySet(), 0), false)
                 .forEach(cursor -> Objects.requireNonNull(cursor.getValue(), cursor.getKey()));
-            this.customs.putAll(customs);
+            materializeCustoms();
+            customsOverride.putAll(customs);
             return this;
+        }
+
+        private void materializeCustoms() {
+            if (customsOverride == null) {
+                customsOverride = new HashMap<>(customsSupplier.get());
+            }
         }
 
         public Builder fromDiff(boolean fromDiff) {
@@ -756,15 +772,22 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
             if (UNKNOWN_UUID.equals(uuid)) {
                 uuid = UUIDs.randomBase64UUID();
             }
+            Supplier<Map<String, Custom>> finalCustomsSupplier;
+            if (customsOverride == null) {
+                finalCustomsSupplier = customsSupplier;
+            } else {
+                Map<String, Custom> snapshot = Collections.unmodifiableMap(customsOverride);
+                finalCustomsSupplier = () -> snapshot;
+            }
             return new ClusterState(
                 clusterName,
                 version,
                 uuid,
-                metadata,
-                routingTable,
-                nodes,
-                blocks,
-                customs,
+                metadataSupplier,
+                routingTableSupplier,
+                nodesSupplier,
+                blocksSupplier,
+                finalCustomsSupplier,
                 minimumClusterManagerNodesOnPublishingClusterManager,
                 fromDiff
             );
@@ -801,10 +824,10 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
         Builder builder = new Builder(clusterName);
         builder.version = in.readLong();
         builder.uuid = in.readString();
-        builder.metadata = Metadata.readFrom(in);
-        builder.routingTable = RoutingTable.readFrom(in);
-        builder.nodes = DiscoveryNodes.readFrom(in, localNode);
-        builder.blocks = ClusterBlocks.readFrom(in);
+        builder.metadata(Metadata.readFrom(in));
+        builder.routingTable(RoutingTable.readFrom(in));
+        builder.nodes(DiscoveryNodes.readFrom(in, localNode));
+        builder.blocks(ClusterBlocks.readFrom(in));
         int customSize = in.readVInt();
         for (int i = 0; i < customSize; i++) {
             Custom customIndexMetadata = in.readNamedWriteable(Custom.class);
