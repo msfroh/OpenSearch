@@ -492,6 +492,26 @@ public class MetadataIndexStateService {
                 private Map<Index, ClusterBlock> blockedIndices;
 
                 @Override
+                public org.opensearch.cluster.service.filter.ClusterStateFilter requiredState() {
+                    // The task body (addIndexBlock static helper) reads per-index settings
+                    // and per-index blocks for the requested indices, then writes both back.
+                    // It does not touch global blocks, routing, in-progress customs, nodes,
+                    // or any other index — declare just those two slices.
+                    final Set<String> names = Arrays.stream(concreteIndices)
+                        .map(Index::getName)
+                        .collect(Collectors.toUnmodifiableSet());
+                    return org.opensearch.cluster.service.filter.ClusterStateFilter.union(
+                        org.opensearch.cluster.service.filter.Slices.indexMetadata(
+                            org.opensearch.cluster.service.filter.IndexScope.named(names),
+                            org.opensearch.cluster.service.filter.IndexMetadataSection.SETTINGS
+                        ),
+                        new org.opensearch.cluster.service.filter.BlocksSlice(
+                            org.opensearch.cluster.service.filter.BlockScope.indices(names)
+                        )
+                    );
+                }
+
+                @Override
                 public ClusterState execute(final ClusterState currentState) {
                     final Tuple<ClusterState, Map<Index, ClusterBlock>> tup = addIndexBlock(
                         concreteIndices,
