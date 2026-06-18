@@ -46,12 +46,12 @@ public interface ClusterStateSupplier extends Supplier<ClusterState> {
     /**
      * Returns a {@link ClusterState} suitable as the {@code currentState} input to a
      * {@link org.opensearch.cluster.ClusterStateUpdateTask}. The {@code hint} is the
-     * union filter declared by the batch of tasks about to run — implementations may use
-     * it to prefetch only the slices the tasks consult, but MUST return at least a
-     * superset of those slices (typically the full state). Returning a narrower state
-     * here would be unsafe, because tasks construct their result via
-     * {@code ClusterState.builder(currentState).put(...).build()} and any slice missing
-     * from the input would be erased on publication.
+     * union filter declared by the batch of tasks about to run — implementations may
+     * narrow to just the slices the tasks consult, or return a superset (up to the full
+     * state). Either way is safe: the {@code ClusterManagerService} composes the
+     * executor's result back onto the prior full state via
+     * {@link org.opensearch.cluster.service.filter.ClusterStateMerger}, so any slice
+     * missing from the executor's input is preserved from prior rather than erased.
      * <p>
      * The default implementation ignores the hint and returns the full state via
      * {@link #get()}.

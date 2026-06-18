@@ -263,30 +263,26 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
     }
 
     /**
-     * Fetches the state that a task batch will execute against. The batch's executor
-     * declares its union {@link org.opensearch.cluster.service.filter.ClusterStateFilter}
-     * via {@link org.opensearch.cluster.ClusterStateTaskExecutor#requiredState(java.util.List)};
-     * if the registered supplier is a {@link ClusterStateSupplier}, that filter is passed
-     * as a prefetching hint. The supplier is contractually allowed (and for safety today,
-     * required) to return at least a superset of the requested slices — typically the
-     * full state — so tasks remain free to use {@code ClusterState.builder(currentState)}.
+     * Computes the {@link org.opensearch.cluster.service.filter.ClusterStateFilter}
+     * declared by this batch's executor via
+     * {@link org.opensearch.cluster.ClusterStateTaskExecutor#requiredState(java.util.List)}.
+     * Returns {@link org.opensearch.cluster.service.filter.ClusterStateFilter#FULL_STATE}
+     * for non-filter-aware suppliers, on failure to compute, or when the executor
+     * doesn't override the default.
      */
-    private ClusterState stateForTask(TaskInputs taskInputs) {
-        java.util.function.Supplier<ClusterState> supplier = clusterStateSupplier;
-        if (supplier instanceof org.opensearch.cluster.service.ClusterStateSupplier filterAware) {
-            org.opensearch.cluster.service.filter.ClusterStateFilter hint;
-            try {
-                List<Object> taskObjects = taskInputs.updateTasks.stream()
-                    .map(task -> (Object) task.getTask())
-                    .collect(Collectors.toList());
-                hint = taskInputs.executor.requiredState(taskObjects);
-            } catch (Exception e) {
-                logger.trace("failed to compute task batch filter; using FULL_STATE hint", e);
-                hint = org.opensearch.cluster.service.filter.ClusterStateFilter.FULL_STATE;
-            }
-            return filterAware.getClusterStateForTask(hint);
+    private org.opensearch.cluster.service.filter.ClusterStateFilter computeFilter(TaskInputs taskInputs) {
+        if (clusterStateSupplier instanceof org.opensearch.cluster.service.ClusterStateSupplier == false) {
+            return org.opensearch.cluster.service.filter.ClusterStateFilter.FULL_STATE;
         }
-        return supplier.get();
+        try {
+            List<Object> taskObjects = taskInputs.updateTasks.stream()
+                .map(task -> (Object) task.getTask())
+                .collect(Collectors.toList());
+            return taskInputs.executor.requiredState(taskObjects);
+        } catch (Exception e) {
+            logger.trace("failed to compute task batch filter; using FULL_STATE hint", e);
+            return org.opensearch.cluster.service.filter.ClusterStateFilter.FULL_STATE;
+        }
     }
 
     private static boolean isClusterManagerUpdateThread() {
@@ -326,16 +322,31 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
             logger.debug("executing cluster state update for [{}]", summary);
         }
 
-        final ClusterState previousClusterState = stateForTask(taskInputs);
+        final org.opensearch.cluster.service.filter.ClusterStateFilter hint = computeFilter(taskInputs);
+        // priorState is the publisher's view of the world — always the full state (lazy
+        // if the supplier is file-backed). The merger composes the new state on top of
+        // priorState's supplier references so unread slices stay lazy.
+        final ClusterState priorState = clusterStateSupplier.get();
+        // narrowInput is what the executor sees: a slice if the supplier is filter-aware
+        // and the executor declared a narrower filter, else priorState itself (so the
+        // merger's isFullState short-circuit returns the executor's resulting state
+        // unchanged, matching today's behaviour for unmigrated tasks).
+        final ClusterState narrowInput;
+        if (hint.isFullState() == false
+            && clusterStateSupplier instanceof org.opensearch.cluster.service.ClusterStateSupplier filterAware) {
+            narrowInput = filterAware.getClusterStateForTask(hint);
+        } else {
+            narrowInput = priorState;
+        }
 
-        if (!previousClusterState.nodes().isLocalNodeElectedClusterManager() && taskInputs.runOnlyWhenClusterManager()) {
+        if (!priorState.nodes().isLocalNodeElectedClusterManager() && taskInputs.runOnlyWhenClusterManager()) {
             logger.debug("failing [{}]: local node is no longer cluster-manager", summary);
             taskInputs.onNoLongerClusterManager();
             return;
         }
 
         final long computationStartTime = threadPool.preciseRelativeTimeInNanos();
-        final TaskOutputs taskOutputs = calculateTaskOutputs(taskInputs, previousClusterState, summary);
+        final TaskOutputs taskOutputs = calculateTaskOutputs(taskInputs, priorState, narrowInput, hint, summary);
         taskOutputs.notifyFailedTasks();
         final TimeValue computationTime = getTimeSince(computationStartTime);
         logExecutionTime(computationTime, "compute cluster state update", summary);
@@ -360,7 +371,7 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
             }
             final long publicationStartTime = threadPool.preciseRelativeTimeInNanos();
             try {
-                ClusterChangedEvent clusterChangedEvent = new ClusterChangedEvent(summary, newClusterState, previousClusterState);
+                ClusterChangedEvent clusterChangedEvent = new ClusterChangedEvent(summary, newClusterState, priorState);
                 // new cluster state, notify all listeners
                 final DiscoveryNodes.Delta nodesDelta = clusterChangedEvent.nodesDelta();
                 if (nodesDelta.hasChanges() && logger.isInfoEnabled()) {
@@ -474,21 +485,34 @@ public class ClusterManagerService extends AbstractLifecycleComponent {
         // TODO: do we want to call updateTask.onFailure here?
     }
 
-    private TaskOutputs calculateTaskOutputs(TaskInputs taskInputs, ClusterState previousClusterState, String taskSummary) {
-        ClusterTasksResult<Object> clusterTasksResult = executeTasks(taskInputs, previousClusterState, taskSummary);
-        ClusterState newClusterState = patchVersions(previousClusterState, clusterTasksResult);
+    private TaskOutputs calculateTaskOutputs(
+        TaskInputs taskInputs,
+        ClusterState priorState,
+        ClusterState narrowInput,
+        org.opensearch.cluster.service.filter.ClusterStateFilter hint,
+        String taskSummary
+    ) {
+        ClusterTasksResult<Object> clusterTasksResult = executeTasks(taskInputs, narrowInput, taskSummary);
+        // Compose the executor's narrow result back into a full state on top of priorState.
+        // For unmigrated tasks the hint is FULL_STATE and the merger passes through
+        // clusterTasksResult.resultingState unchanged, preserving today's semantics.
+        ClusterState merged = org.opensearch.cluster.service.filter.ClusterStateMerger.merge(
+            priorState,
+            narrowInput,
+            clusterTasksResult.resultingState,
+            hint
+        );
+        ClusterState newClusterState = patchVersions(priorState, merged);
         return new TaskOutputs(
             taskInputs,
-            previousClusterState,
+            priorState,
             newClusterState,
             getNonFailedTasks(taskInputs, clusterTasksResult),
             clusterTasksResult.executionResults
         );
     }
 
-    private ClusterState patchVersions(ClusterState previousClusterState, ClusterTasksResult<?> executionResult) {
-        ClusterState newClusterState = executionResult.resultingState;
-
+    private ClusterState patchVersions(ClusterState previousClusterState, ClusterState newClusterState) {
         if (previousClusterState != newClusterState) {
             // only the cluster-manager controls the version numbers
             Builder builder = incrementVersion(newClusterState);
