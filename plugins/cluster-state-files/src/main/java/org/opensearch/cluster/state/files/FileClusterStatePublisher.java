@@ -59,6 +59,7 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
 
     private final Path stateDir;
     private final FileClusterStateSupplier supplier;
+    private final ComponentGarbageCollector gc;
 
     /** Last successfully-published state, used for reference-equality short-circuits on next publish. */
     private ClusterState lastPublishedState;
@@ -66,8 +67,14 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
     private ComponentManifest lastPublishedManifest;
 
     FileClusterStatePublisher(Path stateDir, FileClusterStateSupplier supplier) {
+        this(stateDir, supplier, new ComponentGarbageCollector(ComponentGarbageCollector.DEFAULT_RETENTION));
+    }
+
+    /** Test-friendly constructor that takes an explicit GC (e.g. with a tighter retention window). */
+    FileClusterStatePublisher(Path stateDir, FileClusterStateSupplier supplier, ComponentGarbageCollector gc) {
         this.stateDir = stateDir;
         this.supplier = supplier;
+        this.gc = gc;
     }
 
     @Override
@@ -245,6 +252,10 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
 
         this.lastPublishedState = state;
         this.lastPublishedManifest = manifest;
+
+        // Reap stale component files and expired versioned manifests. Best-effort: the GC
+        // logs and swallows its own errors so a sweep miss never trips a publish failure.
+        gc.sweep(stateDir);
 
         return Files.getLastModifiedTime(currentManifest);
     }
