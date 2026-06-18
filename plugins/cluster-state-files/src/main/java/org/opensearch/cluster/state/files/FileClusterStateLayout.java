@@ -16,20 +16,8 @@ import java.util.HexFormat;
 /**
  * Path and JSON-key constants shared between {@link FileClusterStatePublisher} and
  * {@link FileClusterStateSupplier}.
- * <p>
- * The class describes <em>two</em> layouts:
  *
- * <h2>Legacy single-blob layout</h2>
- * <ul>
- *   <li>{@code current-manifest.json} — atomic pointer to a single {@code manifest-*.json}.</li>
- *   <li>{@code state-&lt;uuid&gt;.bin} — full {@link org.opensearch.cluster.ClusterState}
- *       serialized by {@code ClusterState.Builder.toBytes}.</li>
- *   <li>{@code indices/&lt;index-uuid&gt;.json}, {@code routing/...} — decorative JSON
- *       sidecars.</li>
- * </ul>
- * Still used by the current publisher and supplier.
- *
- * <h2>Per-component write-once layout (this class adds the constants for it)</h2>
+ * <h2>Per-component write-once layout</h2>
  * <pre>
  * state/
  *   current-manifest.json                     # atomic pointer to the latest manifest
@@ -52,19 +40,7 @@ import java.util.HexFormat;
  */
 final class FileClusterStateLayout {
 
-    // --- Legacy single-blob layout ---
-
     static final String CURRENT_MANIFEST = "current-manifest.json";
-    static final String CLUSTER_STATE_FILE = "cluster-state.json";
-    static final String INDICES_DIR = "indices";
-    static final String ROUTING_DIR = "routing";
-    static final String NODE_ROUTING_DIR = "nodes";
-    static final String INDEX_ROUTING_DIR = "indices";
-
-    static final String MANIFEST_STATE_FILE_KEY = "state_file";
-
-    // --- Per-component write-once layout ---
-
     static final String MANIFESTS_DIR = "manifests";
     static final String COMPONENTS_DIR = "components";
     static final String COMPONENTS_INDICES_DIR = "indices";

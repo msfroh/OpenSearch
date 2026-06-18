@@ -10,41 +10,50 @@ package org.opensearch.cluster.state.files;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.cluster.ClusterName;
 import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.block.ClusterBlocks;
+import org.opensearch.cluster.coordination.CoordinationMetadata;
+import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.cluster.node.DiscoveryNodes;
+import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.cluster.service.ClusterStateSupplier;
 import org.opensearch.cluster.service.filter.ClusterStateFilter;
-import org.opensearch.common.xcontent.LoggingDeprecationHandler;
-import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
-import org.opensearch.core.xcontent.NamedXContentRegistry;
-import org.opensearch.core.xcontent.XContentParser;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.Map;
 
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.COMPONENTS_DIR;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.CURRENT_MANIFEST;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_BLOCKS;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_COORDINATION;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_METADATA;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_NODES;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_ROUTING_TABLE;
+
 /**
  * Returns the most recently published {@link ClusterState}.
  * <p>
- * On each call to {@link #get()} we stat the manifest file. If its modification time
- * matches the one we last observed, we return the cached state. Otherwise we parse the
- * manifest, follow it to the consolidated binary state file written by
- * {@link FileClusterStatePublisher}, and rebuild the {@code ClusterState} from disk.
+ * On each call to {@link #get()} we stat {@code current-manifest.json}. If its modification
+ * time matches the one we last observed, we return the cached state. Otherwise we parse the
+ * manifest and reassemble a {@link ClusterState} by reading each component file it
+ * references (see {@link ComponentManifest} and {@link FileClusterStateLayout}).
  * <p>
- * Filter-aware reads via {@link #getClusterState(ClusterStateFilter)} fetch the full
- * cached state and then project it through {@link FileClusterStateProjection} so callers
- * only see the slices they asked for. The on-disk format is still the full state — the
- * narrowing is in-memory.
+ * Filter-aware reads via {@link #getClusterState(ClusterStateFilter)} fetch the full cached
+ * state and project it through {@link FileClusterStateProjection}. The reassembly itself is
+ * eager in this revision; per-component lazy loading lands in a follow-up.
  * <p>
  * The publisher also primes the cache directly after a successful write (see
- * {@link #updateCached(ClusterState, FileTime)}), so steady-state reads inside the
- * same JVM avoid hitting the filesystem at all.
+ * {@link #updateCached(ClusterState, FileTime)}), so steady-state reads inside the same JVM
+ * avoid hitting the filesystem.
  */
 public final class FileClusterStateSupplier implements ClusterStateSupplier {
 
@@ -72,7 +81,7 @@ public final class FileClusterStateSupplier implements ClusterStateSupplier {
 
     /**
      * Called by the plugin's {@code createComponents}; lets the supplier look up the
-     * local {@link DiscoveryNode} lazily for {@link ClusterState.Builder#fromBytes}.
+     * local {@link DiscoveryNode} lazily once the node is available.
      */
     void setClusterService(ClusterService clusterService) {
         this.clusterService = clusterService;
@@ -107,10 +116,10 @@ public final class FileClusterStateSupplier implements ClusterStateSupplier {
     }
 
     private ClusterState readOrCached() {
-        Path manifest = stateDir.resolve(FileClusterStateLayout.CURRENT_MANIFEST);
+        Path manifestFile = stateDir.resolve(CURRENT_MANIFEST);
         FileTime currentMtime;
         try {
-            currentMtime = Files.getLastModifiedTime(manifest);
+            currentMtime = Files.getLastModifiedTime(manifestFile);
         } catch (NoSuchFileException nsfe) {
             // No state has been written yet (fresh node). Return whatever we have cached
             // — likely ClusterState.EMPTY_STATE.
@@ -118,7 +127,7 @@ public final class FileClusterStateSupplier implements ClusterStateSupplier {
                 return cached;
             }
         } catch (IOException e) {
-            logger.warn("failed to stat manifest at {}", manifest, e);
+            logger.warn("failed to stat manifest at {}", manifestFile, e);
             synchronized (mutex) {
                 return cached;
             }
@@ -129,32 +138,108 @@ public final class FileClusterStateSupplier implements ClusterStateSupplier {
                 return cached;
             }
             NamedWriteableRegistry registry = this.namedWriteableRegistry;
-            ClusterService cs = this.clusterService;
             if (registry == null) {
                 // Plumbing not finished yet; fall back to whatever we have cached.
                 return cached;
             }
             try {
-                ClusterState fromDisk = readState(manifest, registry, cs);
+                ClusterState fromDisk = readState(manifestFile, registry);
                 this.cached = fromDisk;
                 this.lastSeenManifestMtime = currentMtime;
                 return fromDisk;
             } catch (IOException e) {
-                logger.warn("failed to read cluster state from {}", manifest, e);
+                logger.warn("failed to read cluster state from {}", manifestFile, e);
                 return cached;
             }
         }
     }
 
-    private ClusterState readState(Path manifest, NamedWriteableRegistry registry, ClusterService cs) throws IOException {
-        String stateFileName = readStateFileNameFromManifest(manifest);
-        Path stateFile = stateDir.resolve(stateFileName);
-        byte[] bytes = Files.readAllBytes(stateFile);
-        DiscoveryNode localNode = cs == null ? null : safeLocalNode(cs);
-        return ClusterState.Builder.fromBytes(bytes, localNode, registry);
+    private ClusterState readState(Path manifestFile, NamedWriteableRegistry registry) throws IOException {
+        ComponentManifest manifest = ComponentManifest.read(manifestFile);
+        Path componentsDir = stateDir.resolve(COMPONENTS_DIR);
+        DiscoveryNode localNode = safeLocalNode(clusterService);
+
+        ClusterState.Builder builder = ClusterState.builder(new ClusterName(manifest.clusterName()))
+            .version(manifest.clusterStateVersion())
+            .stateUUID(manifest.stateUuid());
+
+        Metadata.Builder mdBuilder = Metadata.builder().clusterUUID(manifest.clusterUuid());
+
+        // Metadata header — version / settings / templates / hashes / clusterUUIDCommitted.
+        ComponentCodec.MetadataHeader header = ComponentCodec.readMetadataHeader(
+            componentsDir.resolve(requiredComponent(manifest, SLOT_METADATA))
+        );
+        mdBuilder.version(header.version())
+            .clusterUUID(header.clusterUUID())
+            .clusterUUIDCommitted(header.clusterUUIDCommitted())
+            .transientSettings(header.transientSettings())
+            .persistentSettings(header.persistentSettings())
+            .hashesOfConsistentSettings(header.hashesOfConsistentSettings())
+            .templates(header.templates());
+
+        // Coordination metadata.
+        String coordName = manifest.components().get(SLOT_COORDINATION);
+        if (coordName != null) {
+            CoordinationMetadata coord = ComponentCodec.readCoordination(componentsDir.resolve(coordName));
+            mdBuilder.coordinationMetadata(coord);
+        }
+
+        // Per-index.
+        for (Map.Entry<String, String> e : manifest.indices().entrySet()) {
+            IndexMetadata idx = ComponentCodec.readIndex(componentsDir.resolve(e.getValue()));
+            mdBuilder.put(idx, false);
+        }
+
+        // Metadata customs.
+        for (Map.Entry<String, String> e : manifest.metadataCustoms().entrySet()) {
+            Metadata.Custom c = ComponentCodec.readMetadataCustom(componentsDir.resolve(e.getValue()), registry);
+            mdBuilder.putCustom(e.getKey(), c);
+        }
+
+        builder.metadata(mdBuilder.build());
+
+        // Routing table.
+        String rtName = manifest.components().get(SLOT_ROUTING_TABLE);
+        if (rtName != null) {
+            RoutingTable rt = ComponentCodec.readRoutingTable(componentsDir.resolve(rtName));
+            builder.routingTable(rt);
+        }
+
+        // Blocks.
+        String blocksName = manifest.components().get(SLOT_BLOCKS);
+        if (blocksName != null) {
+            ClusterBlocks blocks = ComponentCodec.readBlocks(componentsDir.resolve(blocksName));
+            builder.blocks(blocks);
+        }
+
+        // Nodes.
+        String nodesName = manifest.components().get(SLOT_NODES);
+        if (nodesName != null) {
+            DiscoveryNodes nodes = ComponentCodec.readNodes(componentsDir.resolve(nodesName), localNode);
+            builder.nodes(nodes);
+        }
+
+        // State customs.
+        for (Map.Entry<String, String> e : manifest.stateCustoms().entrySet()) {
+            ClusterState.Custom c = ComponentCodec.readStateCustom(componentsDir.resolve(e.getValue()), registry);
+            builder.putCustom(e.getKey(), c);
+        }
+
+        return builder.build();
+    }
+
+    private static String requiredComponent(ComponentManifest manifest, String slot) throws IOException {
+        String name = manifest.components().get(slot);
+        if (name == null) {
+            throw new IOException("manifest is missing required component slot '" + slot + "'");
+        }
+        return name;
     }
 
     private static DiscoveryNode safeLocalNode(ClusterService cs) {
+        if (cs == null) {
+            return null;
+        }
         try {
             return cs.localNode();
         } catch (Exception e) {
@@ -162,28 +247,6 @@ public final class FileClusterStateSupplier implements ClusterStateSupplier {
             // as "not available yet" so the first reads (before ClusterService.start)
             // still succeed.
             return null;
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static String readStateFileNameFromManifest(Path manifest) throws IOException {
-        try (
-            XContentParser parser = JsonXContent.jsonXContent.createParser(
-                NamedXContentRegistry.EMPTY,
-                LoggingDeprecationHandler.INSTANCE,
-                Files.newInputStream(manifest)
-            )
-        ) {
-            Map<String, Object> map = parser.map();
-            Object stateFile = map.get(FileClusterStateLayout.MANIFEST_STATE_FILE_KEY);
-            if (stateFile == null) {
-                throw new IOException(
-                    "manifest " + manifest + " is missing required key '" + FileClusterStateLayout.MANIFEST_STATE_FILE_KEY + "'"
-                );
-            }
-            return stateFile.toString();
-        } catch (UncheckedIOException e) {
-            throw e.getCause();
         }
     }
 }

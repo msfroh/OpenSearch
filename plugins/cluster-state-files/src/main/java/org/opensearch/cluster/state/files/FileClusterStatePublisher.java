@@ -15,54 +15,43 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.coordination.ClusterStatePublisher;
 import org.opensearch.cluster.coordination.FailedToCommitClusterStateException;
 import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNode;
-import org.opensearch.cluster.routing.IndexRoutingTable;
-import org.opensearch.cluster.routing.RoutingNode;
-import org.opensearch.cluster.routing.RoutingNodes;
-import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.common.unit.TimeValue;
-import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.action.ActionListener;
-import org.opensearch.core.xcontent.ToXContent;
-import org.opensearch.core.xcontent.XContentBuilder;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.Map;
+import java.util.TreeMap;
+
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.COMPONENTS_DIR;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.COMPONENTS_INDICES_DIR;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.COMPONENTS_METADATA_CUSTOMS_DIR;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.COMPONENTS_STATE_CUSTOMS_DIR;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.CURRENT_MANIFEST;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.MANIFESTS_DIR;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_BLOCKS;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_COORDINATION;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_METADATA;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_NODES;
+import static org.opensearch.cluster.state.files.FileClusterStateLayout.SLOT_ROUTING_TABLE;
 
 /**
- * Writes accepted cluster state updates to a directory tree of files.
+ * Writes accepted cluster state updates as content-addressed per-component files.
  * <p>
- * Layout produced under {@code stateDir}:
- * <ul>
- *   <li>{@code cluster-state.json} — top-level summary: cluster name, version, the list
- *       of index names (without per-index metadata), and the current manifest filename.</li>
- *   <li>{@code state-&lt;uuid&gt;.bin} — full binary {@link ClusterState} (produced by
- *       {@link ClusterState.Builder#toBytes}); read back by {@link FileClusterStateSupplier}.</li>
- *   <li>{@code indices/&lt;index-uuid&gt;.json} — per-index metadata, for downstream
- *       consumers (e.g. data nodes that want just one index).</li>
- *   <li>{@code routing/nodes/node-&lt;node-id&gt;-&lt;uuid&gt;.json} — per-node routing
- *       table, enumerating the shards assigned to that node.</li>
- *   <li>{@code routing/indices/index-&lt;index-name&gt;-&lt;uuid&gt;.json} — per-index
- *       routing table, enumerating each shard and its assignment.</li>
- *   <li>{@code manifest-&lt;uuid&gt;.json} — single atomically-written file listing all
- *       current state and routing files. Atomically renamed onto
- *       {@code current-manifest.json} via {@link StandardCopyOption#ATOMIC_MOVE}.</li>
- * </ul>
- *
- * <p>For the proof of concept the publisher synchronously writes the files, primes the
- * supplier's cache with the freshly-written state and manifest mtime, then signals
- * {@code onCommit} and a single {@code onNodeAck} for the local cluster manager node.
- * Cross-node propagation, fsync, and partial-state filtering are deliberately left for
- * a follow-up.</p>
+ * Each publication walks the new state, dedupes each component against the
+ * previously-published state by reference equality (no I/O, no hashing on a clean slice),
+ * and otherwise serializes the component, hashes the bytes with SHA-256, and writes
+ * {@code components/.../<slot-or-uuid-or-type>-<hash>.bin} if the file isn't already
+ * present (content-addressed dedup across publications). A {@link ComponentManifest}
+ * naming every component's file is then atomic-moved onto {@code current-manifest.json}.
+ * <p>
+ * Layout produced under {@code stateDir} — see {@link FileClusterStateLayout} for the full
+ * description. Cross-publication GC of unreferenced component files is a follow-up.
  */
 final class FileClusterStatePublisher implements ClusterStatePublisher {
 
@@ -70,6 +59,11 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
 
     private final Path stateDir;
     private final FileClusterStateSupplier supplier;
+
+    /** Last successfully-published state, used for reference-equality short-circuits on next publish. */
+    private ClusterState lastPublishedState;
+    /** Manifest of the last successfully-published state, used to reuse filenames for unchanged components. */
+    private ComponentManifest lastPublishedManifest;
 
     FileClusterStatePublisher(Path stateDir, FileClusterStateSupplier supplier) {
         this.stateDir = stateDir;
@@ -104,193 +98,239 @@ final class FileClusterStatePublisher implements ClusterStatePublisher {
         publishListener.onResponse(null);
     }
 
-    private FileTime writeAll(ClusterState state) throws IOException {
+    /** Visible for testing: serializes {@code state} to the on-disk layout and returns the new manifest's mtime. */
+    FileTime writeAll(ClusterState state) throws IOException {
         Files.createDirectories(stateDir);
-        Path indicesDir = stateDir.resolve(FileClusterStateLayout.INDICES_DIR);
-        Path routingDir = stateDir.resolve(FileClusterStateLayout.ROUTING_DIR);
-        Path nodeRoutingDir = routingDir.resolve(FileClusterStateLayout.NODE_ROUTING_DIR);
-        Path indexRoutingDir = routingDir.resolve(FileClusterStateLayout.INDEX_ROUTING_DIR);
-        Files.createDirectories(indicesDir);
-        Files.createDirectories(nodeRoutingDir);
-        Files.createDirectories(indexRoutingDir);
+        Path componentsDir = stateDir.resolve(COMPONENTS_DIR);
+        Files.createDirectories(componentsDir);
+        Files.createDirectories(componentsDir.resolve(COMPONENTS_INDICES_DIR));
+        Files.createDirectories(componentsDir.resolve(COMPONENTS_STATE_CUSTOMS_DIR));
+        Files.createDirectories(componentsDir.resolve(COMPONENTS_METADATA_CUSTOMS_DIR));
+        Files.createDirectories(stateDir.resolve(MANIFESTS_DIR));
 
-        // The consolidated binary state — the supplier reads this file back on the next get().
-        String stateFileName = "state-" + UUID.randomUUID() + ".bin";
-        Path stateFile = stateDir.resolve(stateFileName);
-        byte[] stateBytes = ClusterState.Builder.toBytes(state);
-        writeAtomic(stateFile, stateBytes);
+        Metadata metadata = state.metadata();
+        Metadata priorMetadata = lastPublishedState == null ? null : lastPublishedState.metadata();
 
-        List<String> indexNames = new ArrayList<>();
-        for (IndexMetadata indexMetadata : state.metadata().indices().values()) {
-            indexNames.add(indexMetadata.getIndex().getName());
-            Path indexFile = indicesDir.resolve(indexMetadata.getIndexUUID() + ".json");
-            writeJson(indexFile, builder -> {
-                builder.startObject();
-                indexMetadata.toXContent(builder, ToXContent.EMPTY_PARAMS);
-                builder.endObject();
-            });
+        Map<String, String> components = new TreeMap<>();
+        Map<String, String> indices = new TreeMap<>();
+        Map<String, String> stateCustoms = new TreeMap<>();
+        Map<String, String> metadataCustoms = new TreeMap<>();
+
+        // ---- Top-level slots ----
+
+        components.put(
+            SLOT_METADATA,
+            writeOrReuse(
+                componentsDir,
+                SLOT_METADATA,
+                priorMetadata != null && sameMetadataHeader(priorMetadata, metadata),
+                slot -> ComponentCodec.writeMetadataHeader(metadata),
+                slot -> FileClusterStateLayout.componentFileName(slot, "")
+            )
+        );
+
+        components.put(
+            SLOT_ROUTING_TABLE,
+            writeOrReuse(
+                componentsDir,
+                SLOT_ROUTING_TABLE,
+                lastPublishedState != null && lastPublishedState.routingTable() == state.routingTable(),
+                slot -> ComponentCodec.writeRoutingTable(state.routingTable()),
+                slot -> FileClusterStateLayout.componentFileName(slot, "")
+            )
+        );
+
+        components.put(
+            SLOT_BLOCKS,
+            writeOrReuse(
+                componentsDir,
+                SLOT_BLOCKS,
+                lastPublishedState != null && lastPublishedState.blocks() == state.blocks(),
+                slot -> ComponentCodec.writeBlocks(state.blocks()),
+                slot -> FileClusterStateLayout.componentFileName(slot, "")
+            )
+        );
+
+        components.put(
+            SLOT_NODES,
+            writeOrReuse(
+                componentsDir,
+                SLOT_NODES,
+                lastPublishedState != null && lastPublishedState.nodes() == state.nodes(),
+                slot -> ComponentCodec.writeNodes(state.nodes()),
+                slot -> FileClusterStateLayout.componentFileName(slot, "")
+            )
+        );
+
+        components.put(
+            SLOT_COORDINATION,
+            writeOrReuse(
+                componentsDir,
+                SLOT_COORDINATION,
+                priorMetadata != null && priorMetadata.coordinationMetadata() == metadata.coordinationMetadata(),
+                slot -> ComponentCodec.writeCoordination(metadata.coordinationMetadata()),
+                slot -> FileClusterStateLayout.componentFileName(slot, "")
+            )
+        );
+
+        // ---- Per-index ----
+        for (IndexMetadata idx : metadata.indices().values()) {
+            String uuid = idx.getIndexUUID();
+            IndexMetadata prior = priorMetadata == null ? null : indexByUuid(priorMetadata, uuid);
+            boolean reuse = prior != null && prior == idx;
+            String reusedName = reuse ? lastPublishedManifest.indices().get(uuid) : null;
+            byte[] bytes = reuse ? null : ComponentCodec.writeIndex(idx);
+            String name = writePerKey(
+                componentsDir,
+                COMPONENTS_INDICES_DIR,
+                reusedName,
+                bytes,
+                sha -> FileClusterStateLayout.indexComponentFileName(uuid, sha)
+            );
+            indices.put(uuid, name);
         }
 
-        List<String> indexRoutingFiles = new ArrayList<>();
-        for (IndexRoutingTable indexRouting : state.routingTable()) {
-            String fileName = "index-" + indexRouting.getIndex().getName() + "-" + UUID.randomUUID() + ".json";
-            indexRoutingFiles.add(fileName);
-            Path indexRoutingFile = indexRoutingDir.resolve(fileName);
-            writeJson(indexRoutingFile, builder -> {
-                builder.startObject();
-                builder.field("index", indexRouting.getIndex().getName());
-                builder.field("index_uuid", indexRouting.getIndex().getUUID());
-                builder.startArray("shards");
-                indexRouting.shards().forEach((shardId, shardRoutingTable) -> {
-                    try {
-                        builder.startObject();
-                        builder.field("shard_id", shardId);
-                        builder.startArray("routings");
-                        for (ShardRouting routing : shardRoutingTable) {
-                            routing.toXContent(builder, ToXContent.EMPTY_PARAMS);
-                        }
-                        builder.endArray();
-                        builder.endObject();
-                    } catch (IOException e) {
-                        throw new UncheckedIOException(e);
-                    }
-                });
-                builder.endArray();
-                builder.endObject();
-            });
+        // ---- State customs ----
+        for (Map.Entry<String, ClusterState.Custom> e : state.customs().entrySet()) {
+            String type = e.getKey();
+            ClusterState.Custom custom = e.getValue();
+            ClusterState.Custom prior = lastPublishedState == null ? null : lastPublishedState.customs().get(type);
+            boolean reuse = prior != null && prior == custom;
+            String reusedName = reuse ? lastPublishedManifest.stateCustoms().get(type) : null;
+            byte[] bytes = reuse ? null : ComponentCodec.writeStateCustom(custom);
+            String name = writePerKey(
+                componentsDir,
+                COMPONENTS_STATE_CUSTOMS_DIR,
+                reusedName,
+                bytes,
+                sha -> FileClusterStateLayout.stateCustomFileName(type, sha)
+            );
+            stateCustoms.put(type, name);
         }
 
-        List<String> nodeRoutingFiles = new ArrayList<>();
-        RoutingNodes routingNodes = state.getRoutingNodes();
-        for (RoutingNode node : routingNodes) {
-            String fileName = "node-" + node.nodeId() + "-" + UUID.randomUUID() + ".json";
-            nodeRoutingFiles.add(fileName);
-            Path nodeFile = nodeRoutingDir.resolve(fileName);
-            writeJson(nodeFile, builder -> {
-                builder.startObject();
-                builder.field("node_id", node.nodeId());
-                if (node.node() != null) {
-                    builder.field("node_name", node.node().getName());
-                }
-                builder.startArray("shards");
-                for (ShardRouting routing : node) {
-                    routing.toXContent(builder, ToXContent.EMPTY_PARAMS);
-                }
-                builder.endArray();
-                builder.endObject();
-            });
+        // ---- Metadata customs ----
+        for (Map.Entry<String, Metadata.Custom> e : metadata.customs().entrySet()) {
+            String type = e.getKey();
+            Metadata.Custom custom = e.getValue();
+            Metadata.Custom prior = priorMetadata == null ? null : priorMetadata.customs().get(type);
+            boolean reuse = prior != null && prior == custom;
+            String reusedName = reuse ? lastPublishedManifest.metadataCustoms().get(type) : null;
+            byte[] bytes = reuse ? null : ComponentCodec.writeMetadataCustom(custom);
+            String name = writePerKey(
+                componentsDir,
+                COMPONENTS_METADATA_CUSTOMS_DIR,
+                reusedName,
+                bytes,
+                sha -> FileClusterStateLayout.metadataCustomFileName(type, sha)
+            );
+            metadataCustoms.put(type, name);
         }
 
-        Path manifestFile = stateDir.resolve("manifest-" + UUID.randomUUID() + ".json");
-        writeJson(manifestFile, builder -> {
-            builder.startObject();
-            builder.field("cluster_state_version", state.version());
-            builder.field("state_uuid", state.stateUUID());
-            builder.field(FileClusterStateLayout.MANIFEST_STATE_FILE_KEY, stateFileName);
-            builder.startArray("index_metadata_files");
-            for (IndexMetadata indexMetadata : state.metadata().indices().values()) {
-                builder.value(FileClusterStateLayout.INDICES_DIR + "/" + indexMetadata.getIndexUUID() + ".json");
-            }
-            builder.endArray();
-            builder.startArray("node_routing_files");
-            for (String fn : nodeRoutingFiles) {
-                builder.value(fn);
-            }
-            builder.endArray();
-            builder.startArray("index_routing_files");
-            for (String fn : indexRoutingFiles) {
-                builder.value(fn);
-            }
-            builder.endArray();
-            builder.endObject();
-        });
+        ComponentManifest manifest = new ComponentManifest(
+            state.version(),
+            state.stateUUID(),
+            metadata.clusterUUID(),
+            state.getClusterName().value(),
+            components,
+            indices,
+            stateCustoms,
+            metadataCustoms
+        );
 
-        // Atomically expose the new manifest by renaming it over current-manifest.json.
-        Path currentManifest = stateDir.resolve(FileClusterStateLayout.CURRENT_MANIFEST);
-        moveAtomic(manifestFile, currentManifest);
+        // Atomically expose the new manifest: write versioned manifest, then atomic-move onto current-manifest.json.
+        Path versionedManifest = stateDir.resolve(FileClusterStateLayout.manifestFileName(state.stateUUID()));
+        writeAtomic(versionedManifest, manifest.toJsonBytes());
+        Path currentManifest = stateDir.resolve(CURRENT_MANIFEST);
+        writeAtomic(currentManifest, manifest.toJsonBytes());
 
-        // Top-level summary — references only the index names, not their metadata.
-        Path rootFile = stateDir.resolve(FileClusterStateLayout.CLUSTER_STATE_FILE);
-        writeJson(rootFile, builder -> {
-            builder.startObject();
-            builder.field("cluster_name", state.getClusterName().value());
-            builder.field("cluster_state_version", state.version());
-            builder.field("state_uuid", state.stateUUID());
-            builder.startArray("indices");
-            for (String name : indexNames) {
-                builder.value(name);
-            }
-            builder.endArray();
-            builder.field("manifest_file", currentManifest.getFileName().toString());
-            builder.endObject();
-        });
-
-        // Best-effort cleanup of routing files and consolidated state blobs no longer
-        // referenced by the latest manifest. Index-metadata files are keyed by index
-        // UUID and overwritten in place; nothing to clean there.
-        cleanupStaleFiles(nodeRoutingDir, nodeRoutingFiles);
-        cleanupStaleFiles(indexRoutingDir, indexRoutingFiles);
-        cleanupStaleStateFiles(stateDir, stateFileName);
+        this.lastPublishedState = state;
+        this.lastPublishedManifest = manifest;
 
         return Files.getLastModifiedTime(currentManifest);
     }
 
-    private static void cleanupStaleFiles(Path dir, List<String> keep) {
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
-            for (Path file : stream) {
-                if (keep.contains(file.getFileName().toString()) == false) {
-                    try {
-                        Files.deleteIfExists(file);
-                    } catch (IOException ignored) {
-                        // Stale file cleanup is best-effort.
-                    }
-                }
+    /**
+     * Slot writer for top-level components. {@code filenameForSha} is invoked only when the component is materialized.
+     */
+    private String writeOrReuse(
+        Path componentsDir,
+        String slot,
+        boolean canReuse,
+        ComponentBytesProducer producer,
+        java.util.function.Function<String, String> filenameForSha
+    ) throws IOException {
+        if (canReuse) {
+            String prior = lastPublishedManifest.components().get(slot);
+            if (prior != null) {
+                return prior;
             }
-        } catch (IOException ignored) {
-            // Listing failures are non-fatal for the publish itself.
         }
+        byte[] bytes = producer.produce(slot);
+        String sha = FileClusterStateLayout.sha256(bytes);
+        String filename = FileClusterStateLayout.componentFileName(slot, sha);
+        Path file = componentsDir.resolve(filename);
+        if (Files.exists(file) == false) {
+            writeAtomic(file, bytes);
+        }
+        return filename;
     }
 
-    private static void cleanupStaleStateFiles(Path dir, String keep) {
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "state-*.bin")) {
-            for (Path file : stream) {
-                if (keep.equals(file.getFileName().toString()) == false) {
-                    try {
-                        Files.deleteIfExists(file);
-                    } catch (IOException ignored) {
-                        // best-effort
-                    }
-                }
-            }
-        } catch (IOException ignored) {
-            // best-effort
+    /**
+     * Per-key writer for indices and customs. Either reuses {@code reusedName} (skipping I/O entirely)
+     * or hashes {@code bytes} and writes {@code subdir/<filenameForSha(sha)>} if absent.
+     */
+    private String writePerKey(
+        Path componentsDir,
+        String subdir,
+        String reusedName,
+        byte[] bytes,
+        java.util.function.Function<String, String> filenameForSha
+    ) throws IOException {
+        if (reusedName != null) {
+            return reusedName;
         }
+        String sha = FileClusterStateLayout.sha256(bytes);
+        String filename = filenameForSha.apply(sha);
+        Path file = componentsDir.resolve(filename);
+        if (Files.exists(file) == false) {
+            Files.createDirectories(file.getParent());
+            writeAtomic(file, bytes);
+        }
+        return filename;
     }
 
     @FunctionalInterface
-    private interface JsonWriter {
-        void write(XContentBuilder builder) throws IOException;
+    private interface ComponentBytesProducer {
+        byte[] produce(String slot) throws IOException;
     }
 
-    private static void writeJson(Path file, JsonWriter body) throws IOException {
-        try (XContentBuilder builder = JsonXContent.contentBuilder()) {
-            body.write(builder);
-            byte[] bytes = builder.toString().getBytes(StandardCharsets.UTF_8);
-            writeAtomic(file, bytes);
+    /** True when every field in the metadata header (see {@link ComponentCodec.MetadataHeader}) matches by equals. */
+    private static boolean sameMetadataHeader(Metadata a, Metadata b) {
+        return a.version() == b.version()
+            && a.clusterUUID().equals(b.clusterUUID())
+            && a.clusterUUIDCommitted() == b.clusterUUIDCommitted()
+            && a.transientSettings().equals(b.transientSettings())
+            && a.persistentSettings().equals(b.persistentSettings())
+            && a.hashesOfConsistentSettings().equals(b.hashesOfConsistentSettings())
+            && a.templates().equals(b.templates());
+    }
+
+    private static IndexMetadata indexByUuid(Metadata metadata, String uuid) {
+        for (IndexMetadata idx : metadata.indices().values()) {
+            if (uuid.equals(idx.getIndexUUID())) {
+                return idx;
+            }
         }
+        return null;
     }
 
     private static void writeAtomic(Path file, byte[] bytes) throws IOException {
         Path tmp = file.resolveSibling(file.getFileName().toString() + ".tmp");
         Files.write(tmp, bytes);
-        moveAtomic(tmp, file);
-    }
-
-    private static void moveAtomic(Path from, Path to) throws IOException {
         try {
-            Files.move(from, to, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 }
