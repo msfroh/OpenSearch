@@ -155,4 +155,39 @@ public final class LazyIndices extends AbstractMap<String, IndexMetadata> {
         }
         return out;
     }
+
+    /**
+     * Returns a new {@code LazyIndices} where the given key maps to {@code value} and every
+     * other entry inherits this instance's existing supplier reference (never invoked).
+     * The key must already be present — this method is intended for in-place section overlays,
+     * not for adding or removing indices (those would invalidate {@link Metadata}'s
+     * precomputed index name arrays and lookup).
+     */
+    public LazyIndices with(String key, IndexMetadata value) {
+        if (entries.containsKey(key) == false) {
+            throw new IllegalArgumentException("LazyIndices.with: key not present: " + key);
+        }
+        Map<String, CachedSupplier<IndexMetadata>> next = new LinkedHashMap<>(entries);
+        next.put(key, new CachedSupplier<>(() -> value));
+        return new LazyIndices(next);
+    }
+
+    /**
+     * Bulk variant of {@link #with(String, IndexMetadata)}. Every override key must already
+     * be present; non-overridden entries inherit this instance's supplier references.
+     */
+    public LazyIndices with(Map<String, IndexMetadata> overrides) {
+        if (overrides == null || overrides.isEmpty()) {
+            return this;
+        }
+        Map<String, CachedSupplier<IndexMetadata>> next = new LinkedHashMap<>(entries);
+        for (Map.Entry<String, IndexMetadata> e : overrides.entrySet()) {
+            if (next.containsKey(e.getKey()) == false) {
+                throw new IllegalArgumentException("LazyIndices.with: key not present: " + e.getKey());
+            }
+            IndexMetadata value = e.getValue();
+            next.put(e.getKey(), new CachedSupplier<>(() -> value));
+        }
+        return new LazyIndices(next);
+    }
 }

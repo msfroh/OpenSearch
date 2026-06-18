@@ -51,6 +51,7 @@ import org.opensearch.cluster.decommission.DecommissionAttributeMetadata;
 import org.opensearch.cluster.routing.RoutingPool;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.UUIDs;
+import org.opensearch.common.annotation.InternalApi;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.regex.Regex;
 import org.opensearch.common.settings.Setting;
@@ -334,7 +335,18 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
      * accessor) requests it. The {@code shardCountsSupplier} iterates the indices on first
      * access, so callers of {@link #getTotalNumberOfShards()} / friends still pay for full
      * materialization — but tasks that never touch the counts never pay.
+     *
+     * Package-private + {@link InternalApi}: invoked by the eager {@code public} ctor
+     * above, {@link Metadata.Builder#build()}, and {@link MetadataLazyComposer}.
+     * External callers compose lazy {@code Metadata} via {@link MetadataLazyComposer}.
+     * Kept package-private so {@code Metadata}'s public surface does not leak
+     * {@link LazyIndices} — the API annotation processor rejects {@code @PublicApi}
+     * classes that expose {@code @InternalApi} types through public method signatures
+     * (constructors are exempt, but a public static factory would not be).
+     *
+     * @opensearch.internal
      */
+    @InternalApi
     Metadata(
         String clusterUUID,
         boolean clusterUUIDCommitted,
@@ -402,6 +414,52 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, To
 
     private static <T> CachedSupplier<T> asCached(Supplier<T> supplier) {
         return supplier instanceof CachedSupplier<T> cached ? cached : new CachedSupplier<>(supplier);
+    }
+
+    /**
+     * Composes a new {@code Metadata} from {@code prior} with selective per-component
+     * overrides. Any {@code null} override inherits {@code prior}'s existing supplier
+     * reference (never invoked), preserving the laziness chain. The precomputed index
+     * name arrays and lookup are inherited verbatim — callers MUST NOT pass an
+     * {@code indicesOverride} that adds or removes index keys; in-place section overlays
+     * of existing keys are the only supported mutation. Cluster identity fields
+     * ({@code clusterUUID}, {@code clusterUUIDCommitted}, {@code version}) are inherited
+     * from {@code prior} unconditionally — versions are stamped downstream in
+     * {@code ClusterManagerService.patchVersions}.
+     *
+     * Package-private: external callers go through {@link MetadataLazyComposer}, which
+     * lives in this package and forwards here.
+     */
+    static Metadata composeFromPrior(
+        Metadata prior,
+        Supplier<CoordinationMetadata> coordinationOverride,
+        Supplier<Settings> transientSettingsOverride,
+        Supplier<Settings> persistentSettingsOverride,
+        Supplier<DiffableStringMap> hashesOverride,
+        LazyIndices indicesOverride,
+        Supplier<TemplatesMetadata> templatesOverride,
+        Supplier<Map<String, Custom>> customsOverride
+    ) {
+        return new Metadata(
+            prior.clusterUUID,
+            prior.clusterUUIDCommitted,
+            prior.version,
+            coordinationOverride != null ? coordinationOverride : prior.coordinationMetadataSupplier,
+            transientSettingsOverride != null ? transientSettingsOverride : prior.transientSettingsSupplier,
+            persistentSettingsOverride != null ? persistentSettingsOverride : prior.persistentSettingsSupplier,
+            hashesOverride != null ? hashesOverride : prior.hashesOfConsistentSettingsSupplier,
+            indicesOverride != null ? indicesOverride : prior.indices,
+            templatesOverride != null ? templatesOverride : prior.templatesSupplier,
+            customsOverride != null ? customsOverride : prior.customsSupplier,
+            prior.allIndices,
+            prior.visibleIndices,
+            prior.allOpenIndices,
+            prior.visibleOpenIndices,
+            prior.allClosedIndices,
+            prior.visibleClosedIndices,
+            prior.indicesLookup,
+            prior.systemTemplatesLookup
+        );
     }
 
     public long version() {

@@ -49,6 +49,7 @@ import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.UUIDs;
+import org.opensearch.common.annotation.InternalApi;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.common.settings.Settings;
@@ -233,7 +234,13 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
      * Intended for suppliers (e.g., file-backed) that can stream components from disk.
      * The map supplier is responsible for wrapping its result in
      * {@link Collections#unmodifiableMap} if needed.
+     *
+     * Package-private: external callers compose lazy {@code ClusterState} instances via
+     * {@link Builder} (whose copy ctor propagates supplier references unchanged).
+     *
+     * @opensearch.internal
      */
+    @InternalApi
     ClusterState(
         ClusterName clusterName,
         long version,
